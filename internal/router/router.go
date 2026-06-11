@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"net/http"
 	"time"
 	"venturo-skeleton-go/internal/config"
 	"venturo-skeleton-go/internal/middleware"
@@ -20,11 +21,17 @@ import (
 
 	"venturo-skeleton-go/internal/shared/audit"
 	"venturo-skeleton-go/internal/shared/authz"
+	"venturo-skeleton-go/internal/shared/rabbitmq"
 	sharedRedis "venturo-skeleton-go/internal/shared/redis"
 
+	"venturo-skeleton-go/pkg/cache"
 	pkgfirebase "venturo-skeleton-go/pkg/firebase"
 	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go/pkg/notification"
+	pkgsentry "venturo-skeleton-go/pkg/sentry"
+	"venturo-skeleton-go/pkg/storage"
 
+	sentrygin "github.com/getsentry/sentry-go/gin"
 	"github.com/gin-contrib/cors"
 	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
@@ -35,6 +42,11 @@ import (
 func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 	// Get logger instance
 	log := logger.GetLogger()
+
+	// Sentry is active when a DSN is configured (see pkg/sentry). Computed
+	// once here from cfg — used by the recovery middleware and the dev-only
+	// test endpoint below.
+	sentryActive := cfg.Sentry.DSN != ""
 
 	// ─── Redis & authz cache ────────────────────────────────────────
 	// Redis backs the per-user permission cache (see
@@ -51,8 +63,49 @@ func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 		zap.Duration("permission_ttl", cfg.Redis.PermissionTTL),
 	)
 
+	// ─── Cache (reuses the Redis client above) ──────────────────────
+	// The typed cache shares the existing Redis connection — it never opens
+	// a new one. Provided for modules to inject via setter (like authzService).
+	cacheService := cache.New(redisClient, cache.Config{
+		KeyPrefix:  cfg.Cache.KeyPrefix,
+		DefaultTTL: cfg.Cache.DefaultTTL,
+	})
+	_ = cacheService // not yet wired to a business module
+	log.Info("Cache initialized",
+		zap.String("key_prefix", cfg.Cache.KeyPrefix),
+		zap.Duration("default_ttl", cfg.Cache.DefaultTTL),
+	)
+
+	// ─── Storage (degraded: nil when no credentials configured) ─────
+	storageClient := initStorage(context.Background(), cfg)
+	_ = storageClient // not yet wired to a business module
+
+	// ─── Notification (always succeeds; channels degrade to no-op) ──
+	// notification.New logs the selected adapters at boot.
+	notifier, err := notification.New(context.Background(), notification.Config{
+		Twilio: notification.TwilioConfig{
+			AccountSID: cfg.Notification.TwilioAccountSID,
+			AuthToken:  cfg.Notification.TwilioAuthToken,
+			FromNumber: cfg.Notification.TwilioFromNumber,
+		},
+		FCM: notification.FCMConfig{
+			CredentialsJSON: cfg.Notification.FCMCredentialsJSON,
+		},
+	}, notification.NewEmailSender())
+	if err != nil {
+		log.Error("Notification init failed (continuing with no-op)", zap.Error(err))
+	}
+	_ = notifier // not yet wired to a business module
+
 	// Ginzap middleware for logging HTTP requests
 	router.Use(ginzap.Ginzap(log, time.RFC3339, true))
+
+	// Sentry middleware — captures panics before the zap recovery below
+	// re-recovers them. Only mounted when Sentry is active. Repanic:true so
+	// the existing RecoveryWithZap still produces the 500 response.
+	if sentryActive {
+		router.Use(sentrygin.New(sentrygin.Options{Repanic: true}))
+	}
 
 	// Recovery middleware with Zap (handles panics)
 	router.Use(ginzap.RecoveryWithZap(log, true))
@@ -74,6 +127,43 @@ func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 			"message": "Tuai API is running",
 		})
 	})
+
+	// ─── RabbitMQ client + publisher + consumer (degraded/opt-in) ───
+	// Messaging is optional for the skeleton: when RABBITMQ_ENABLED=false, or
+	// the broker is unreachable, the app boots without messaging (warn, not
+	// fatal) and the publisher/consumer are simply not wired. Flip to
+	// load-bearing once a module actually depends on the queue.
+	if !cfg.RabbitMQ.Enabled {
+		log.Warn("RabbitMQ disabled (RABBITMQ_ENABLED=false) — messaging not started")
+	} else if rabbitClient, err := rabbitmq.New(context.Background(), cfg.RabbitMQ); err != nil {
+		log.Warn("RabbitMQ unavailable — messaging disabled, app continues", zap.Error(err))
+	} else {
+		// Build the publisher (available for future module injection) and start
+		// the example consumer as an end-to-end proof. The consumer
+		// re-subscribes automatically across reconnects.
+		publisher, err := rabbitmq.NewPublisher(rabbitClient, cfg.RabbitMQ)
+		if err != nil {
+			log.Warn("RabbitMQ publisher setup failed — messaging disabled", zap.Error(err))
+		} else {
+			_ = publisher // not yet wired to a business module
+
+			consumer := rabbitmq.NewConsumer(rabbitClient, cfg.RabbitMQ)
+			rabbitmq.RegisterExampleConsumer(consumer)
+			if err := consumer.Start(context.Background()); err != nil {
+				log.Warn("RabbitMQ consumer start failed — messaging degraded", zap.Error(err))
+			}
+		}
+	}
+
+	// ─── Dev-only Sentry test endpoint ──────────────────────────────
+	// Proves error tracking end-to-end. Only mounted in development.
+	if cfg.Server.Env == "development" && sentryActive {
+		router.GET("/debug/sentry-test", func(c *gin.Context) {
+			pkgsentry.CaptureMessage("sentry-test endpoint hit")
+			logger.Error("sentry-test: synthetic error log")
+			c.JSON(http.StatusOK, gin.H{"message": "sent test event to Sentry"})
+		})
+	}
 
 	// Core v1 routes
 	coreV1 := router.Group("/core/v1")
@@ -208,4 +298,41 @@ func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 	auditModule.SetupRoutes(coreV1)
 
 	log.Info("Routes setup completed", zap.Int("routes", len(router.Routes())))
+}
+
+// initStorage builds a storage client for the configured provider, returning
+// nil (degraded) when the provider has no usable credentials so the app still
+// boots without cloud storage.
+func initStorage(ctx context.Context, cfg *config.Config) storage.Client {
+	provider := cfg.Storage.Provider
+	switch provider {
+	case "", "gcs":
+		if cfg.GCS.BucketName == "" {
+			logger.Warn("Storage disabled — GCS_BUCKET_NAME not set (running without storage)")
+			return nil
+		}
+	case "s3", "minio":
+		if cfg.Storage.S3Bucket == "" {
+			logger.Warn("Storage disabled — S3_BUCKET not set (running without storage)")
+			return nil
+		}
+	}
+
+	client, err := storage.New(ctx, storage.Config{
+		Provider:           provider,
+		GCSBucket:          cfg.GCS.BucketName,
+		GCSCredentialsJSON: cfg.GCS.CredentialsJSON,
+		S3Endpoint:         cfg.Storage.S3Endpoint,
+		S3Region:           cfg.Storage.S3Region,
+		S3Bucket:           cfg.Storage.S3Bucket,
+		S3AccessKeyID:      cfg.Storage.S3AccessKeyID,
+		S3SecretAccessKey:  cfg.Storage.S3SecretAccessKey,
+		S3PublicBaseURL:    cfg.Storage.S3PublicBaseURL,
+		S3UsePathStyle:     cfg.Storage.S3UsePathStyle,
+	})
+	if err != nil {
+		logger.Error("Storage init failed (continuing without storage)", logger.Err(err))
+		return nil
+	}
+	return client
 }

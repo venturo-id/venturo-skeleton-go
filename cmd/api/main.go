@@ -8,6 +8,7 @@ import (
 	"venturo-skeleton-go/internal/router"
 	"venturo-skeleton-go/pkg/jwt"
 	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go/pkg/sentry"
 
 	"github.com/gin-gonic/gin"
 )
@@ -30,6 +31,18 @@ func main() {
 
 	logger.Info("Starting Tuai API")
 
+	// Initialize Sentry (degraded/no-op when SENTRY_DSN is empty). Must come
+	// after logger.Initialize: it attaches an error-tee core to the logger.
+	if err := sentry.Init(sentry.Config{
+		DSN:              cfg.Sentry.DSN,
+		Environment:      cfg.Sentry.Environment,
+		Release:          cfg.Sentry.Release,
+		TracesSampleRate: cfg.Sentry.TracesSampleRate,
+	}); err != nil {
+		logger.Error("Sentry init failed (continuing without Sentry)", logger.Err(err))
+	}
+	defer sentry.Flush(2 * time.Second)
+
 	// Validate JWT secret configuration
 	if err := jwt.ValidateSecret(cfg.Server.Env); err != nil {
 		logger.Fatal("JWT secret validation failed: " + err.Error())
@@ -48,7 +61,7 @@ func main() {
 	// Initialize Gin router
 	ginRouter := gin.New() // Use gin.New() instead of gin.Default() since we use custom middleware
 
-	// Setup routes (all modules initialized inside router)
+	// Setup routes (all modules and shared infra initialized inside router)
 	router.Setup(ginRouter, db.Pool, cfg)
 
 	// Start server

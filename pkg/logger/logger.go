@@ -62,6 +62,19 @@ func Initialize(env string) error {
 	return nil
 }
 
+// AttachSentry tees the given core onto the global logger so error-level logs
+// are forwarded to Sentry. Called after sentry.Init (Sentry config isn't
+// available yet when Initialize runs). Mirrors the Discord sink wired in
+// Initialize. No-op if the logger isn't initialized yet.
+func AttachSentry(core zapcore.Core) {
+	if Log == nil || core == nil {
+		return
+	}
+	Log = Log.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
+		return zapcore.NewTee(c, core)
+	}))
+}
+
 // GetLogger returns the global logger instance
 func GetLogger() *zap.Logger {
 	if Log == nil {
