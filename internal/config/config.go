@@ -8,15 +8,20 @@ import (
 )
 
 type Config struct {
-	Database DatabaseConfig
-	Server   ServerConfig
-	Security SecurityConfig
-	Auth     AuthConfig
-	WAHA     WAHAConfig
-	OpenAI   OpenAIConfig
-	Redis    RedisConfig
-	GCS      GCSConfig
-	Firebase FirebaseConfig
+	Database     DatabaseConfig
+	Server       ServerConfig
+	Security     SecurityConfig
+	Auth         AuthConfig
+	WAHA         WAHAConfig
+	OpenAI       OpenAIConfig
+	Redis        RedisConfig
+	GCS          GCSConfig
+	Firebase     FirebaseConfig
+	RabbitMQ     RabbitMQConfig
+	Sentry       SentryConfig
+	Cache        CacheConfig
+	Storage      StorageConfig
+	Notification NotificationConfig
 }
 
 type GCSConfig struct {
@@ -90,6 +95,67 @@ type RedisConfig struct {
 	PermissionTTL time.Duration
 }
 
+// RabbitMQConfig configures the shared AMQP client (internal/shared/rabbitmq).
+// This is the one new infra subsystem consumed directly as config.RabbitMQConfig
+// (it lives under internal/shared/ and is allowed to import internal/config,
+// mirroring RedisConfig). The other four subsystems below are env holders that
+// get mapped to package-local config structs in main.go.
+type RabbitMQConfig struct {
+	// Enabled gates the whole subsystem. When false, the app skips connecting
+	// to RabbitMQ entirely and boots without messaging (degraded). Defaults to
+	// true. Even when true, a failed connection is non-fatal — see router.Setup.
+	Enabled           bool
+	URL               string // amqp://user:pass@host:port/vhost (full override, optional)
+	Host              string
+	Port              string
+	User              string
+	Password          string
+	VHost             string
+	Exchange          string        // default topic exchange owned by the app
+	ReconnectInterval time.Duration // retry delay when the connection drops
+	PrefetchCount     int           // consumer QoS
+	PublishTimeout    time.Duration // how long to wait for a publisher confirm
+}
+
+// SentryConfig holds Sentry env values. Mapped to pkg/sentry.Config in main.go.
+type SentryConfig struct {
+	DSN              string
+	Environment      string
+	Release          string
+	TracesSampleRate float64
+}
+
+// CacheConfig holds cache env values. Mapped to pkg/cache.Config in main.go.
+// The cache reuses the existing Redis client, so connection details live in
+// RedisConfig — only namespacing/TTL belong here.
+type CacheConfig struct {
+	KeyPrefix  string
+	DefaultTTL time.Duration
+}
+
+// StorageConfig holds storage env values. Mapped to pkg/storage.Config in
+// main.go. GCSConfig is kept separately for backward compatibility; this
+// struct carries the provider selector plus S3/MinIO settings.
+type StorageConfig struct {
+	Provider          string // gcs|s3|minio
+	S3Endpoint        string
+	S3Region          string
+	S3Bucket          string
+	S3AccessKeyID     string
+	S3SecretAccessKey string
+	S3PublicBaseURL   string
+	S3UsePathStyle    bool
+}
+
+// NotificationConfig holds notification env values. Mapped to
+// pkg/notification.Config in main.go.
+type NotificationConfig struct {
+	TwilioAccountSID   string
+	TwilioAuthToken    string
+	TwilioFromNumber   string
+	FCMCredentialsJSON string
+}
+
 func Load() *Config {
 	return &Config{
 		Database: DatabaseConfig{
@@ -140,7 +206,56 @@ func Load() *Config {
 			ProjectID:       getEnv("FIREBASE_PROJECT_ID", ""),
 			CredentialsJSON: getEnv("FIREBASE_CREDENTIALS_JSON", ""),
 		},
+		RabbitMQ: RabbitMQConfig{
+			Enabled:           getEnvBool("RABBITMQ_ENABLED", true),
+			URL:               getEnv("RABBITMQ_URL", ""),
+			Host:              getEnv("RABBITMQ_HOST", "localhost"),
+			Port:              getEnv("RABBITMQ_PORT", "5672"),
+			User:              getEnv("RABBITMQ_USER", "guest"),
+			Password:          getEnv("RABBITMQ_PASSWORD", "guest"),
+			VHost:             getEnv("RABBITMQ_VHOST", "/"),
+			Exchange:          getEnv("RABBITMQ_EXCHANGE", "skeleton.events"),
+			ReconnectInterval: getEnvDuration("RABBITMQ_RECONNECT_INTERVAL", 5*time.Second),
+			PrefetchCount:     getEnvInt("RABBITMQ_PREFETCH_COUNT", 10),
+			PublishTimeout:    getEnvDuration("RABBITMQ_PUBLISH_TIMEOUT", 5*time.Second),
+		},
+		Sentry: SentryConfig{
+			DSN:              getEnv("SENTRY_DSN", ""),
+			Environment:      getEnv("SENTRY_ENVIRONMENT", getEnv("ENV", "development")),
+			Release:          getEnv("SENTRY_RELEASE", ""),
+			TracesSampleRate: getEnvFloat64("SENTRY_TRACES_SAMPLE_RATE", 0.0),
+		},
+		Cache: CacheConfig{
+			KeyPrefix:  getEnv("CACHE_KEY_PREFIX", "cache"),
+			DefaultTTL: getEnvDuration("CACHE_DEFAULT_TTL", 5*time.Minute),
+		},
+		Storage: StorageConfig{
+			Provider:          getEnv("STORAGE_PROVIDER", "gcs"),
+			S3Endpoint:        getEnv("S3_ENDPOINT", ""),
+			S3Region:          getEnv("S3_REGION", "us-east-1"),
+			S3Bucket:          getEnv("S3_BUCKET", ""),
+			S3AccessKeyID:     getEnv("S3_ACCESS_KEY_ID", ""),
+			S3SecretAccessKey: getEnv("S3_SECRET_ACCESS_KEY", ""),
+			S3PublicBaseURL:   getEnv("S3_PUBLIC_BASE_URL", ""),
+			S3UsePathStyle:    getEnvBool("S3_USE_PATH_STYLE", false),
+		},
+		Notification: NotificationConfig{
+			TwilioAccountSID:   getEnv("TWILIO_ACCOUNT_SID", ""),
+			TwilioAuthToken:    getEnv("TWILIO_AUTH_TOKEN", ""),
+			TwilioFromNumber:   getEnv("TWILIO_FROM_NUMBER", ""),
+			FCMCredentialsJSON: getEnv("FCM_CREDENTIALS_JSON", ""),
+		},
 	}
+}
+
+// GetURL returns the AMQP connection URL. When URL is set it wins; otherwise
+// the URL is assembled from the discrete components. Mirrors
+// DatabaseConfig.GetDSN().
+func (c *RabbitMQConfig) GetURL() string {
+	if c.URL != "" {
+		return c.URL
+	}
+	return fmt.Sprintf("amqp://%s:%s@%s:%s%s", c.User, c.Password, c.Host, c.Port, c.VHost)
 }
 
 func (c *DatabaseConfig) GetDSN() string {
@@ -193,6 +308,17 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 			return defaultValue
 		}
 		return duration
+	}
+	return defaultValue
+}
+
+func getEnvFloat64(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		floatValue, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return defaultValue
+		}
+		return floatValue
 	}
 	return defaultValue
 }
