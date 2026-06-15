@@ -22,7 +22,7 @@ type fcmPush struct {
 func newFCMPush(ctx context.Context, cfg FCMConfig) PushSender {
 	var opts []option.ClientOption
 	if cfg.CredentialsJSON != "" {
-		opts = append(opts, option.WithCredentialsJSON([]byte(cfg.CredentialsJSON)))
+		opts = append(opts, option.WithAuthCredentialsJSON(option.ServiceAccount, []byte(cfg.CredentialsJSON)))
 	} else {
 		// No explicit creds and no ADC hint — treat as unconfigured to avoid a
 		// slow ADC lookup that will fail anyway in dev.
