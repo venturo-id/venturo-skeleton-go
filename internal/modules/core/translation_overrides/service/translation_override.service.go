@@ -10,15 +10,16 @@ import (
 	"venturo-skeleton-go/internal/modules/core/translation_overrides/domain"
 	"venturo-skeleton-go/internal/modules/core/translation_overrides/dto"
 	"venturo-skeleton-go/internal/modules/core/translation_overrides/repository"
+	"venturo-skeleton-go/pkg/derrors"
 )
 
 // Service errors surfaced to handlers.
 var (
-	ErrNotFound     = errors.New("translation override not found")
-	ErrDuplicateKey = errors.New("translation key already exists for this client")
-	ErrInvalidKey   = errors.New("translation_key must match ^[a-z0-9-]+$")
-	ErrEmptyValue   = errors.New("value must not be empty")
-	ErrClientGone   = errors.New("client not found")
+	ErrNotFound     = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Translation override not found")
+	ErrDuplicateKey = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "Translation key already exists for this client")
+	ErrInvalidKey   = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "translation_key must match ^[a-z0-9-]+$")
+	ErrEmptyValue   = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "value must not be empty")
+	ErrClientGone   = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Client not found")
 )
 
 // keyPattern mirrors the CHECK constraint in the migration so we fail

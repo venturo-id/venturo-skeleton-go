@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -46,7 +45,7 @@ func (h *UserBranchHandler) GetUserBranches(c *gin.Context) {
 	ctx := c.Request.Context()
 	ids, err := h.svc.GetUserBranchIDs(ctx, userID)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get user branches", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -62,7 +61,7 @@ func (h *UserBranchHandler) SyncUserBranches(c *gin.Context) {
 
 	var req dto.SyncUserBranchesRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -75,14 +74,7 @@ func (h *UserBranchHandler) SyncUserBranches(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	if err := h.svc.SyncUserBranches(ctx, userID, req.BranchIDs, updatedBy, scope); err != nil {
-		switch {
-		case errors.Is(err, service.ErrInvalidBranchIDs):
-			response.Error(c, http.StatusBadRequest, "Invalid branch_ids", err.Error())
-		case errors.Is(err, service.ErrBranchNotInScope):
-			response.Error(c, http.StatusForbidden, "Branch not in caller's scope", err.Error())
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to sync user branches", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 

@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -25,21 +24,14 @@ func NewAuthHandler(authService *service.AuthService) *AuthHandler {
 func (h *AuthHandler) SignUp(c *gin.Context) {
 	var req dto.SignUpRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
 	ctx := c.Request.Context()
 	result, err := h.authService.SignUp(ctx, &req)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrEmailAlreadyExists):
-			response.Error(c, http.StatusConflict, "Email already exists", "")
-		case errors.Is(err, service.ErrUsernameAlreadyExists):
-			response.Error(c, http.StatusConflict, "Username already exists", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to register user", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -49,7 +41,7 @@ func (h *AuthHandler) SignUp(c *gin.Context) {
 func (h *AuthHandler) SignIn(c *gin.Context) {
 	var req dto.SignInRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -63,18 +55,7 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.authService.SignIn(ctx, &req, deviceInfo, ipAddress)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrInvalidCredentials):
-			response.Error(c, http.StatusUnauthorized, "Invalid credentials", "")
-		case errors.Is(err, service.ErrUserNotActive):
-			response.Error(c, http.StatusUnauthorized, "User account is not active", "")
-		case errors.Is(err, service.ErrUserLocked):
-			response.Error(c, http.StatusUnauthorized, "User account is locked. Try again later.", "")
-		case errors.Is(err, service.ErrEmailNotVerified):
-			response.Error(c, http.StatusUnauthorized, "Email not verified", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to sign in", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -108,7 +89,7 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 func (h *AuthHandler) SignInWithGoogle(c *gin.Context) {
 	var req dto.GoogleSignInRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -119,20 +100,7 @@ func (h *AuthHandler) SignInWithGoogle(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.authService.SignInWithGoogle(ctx, &req, deviceInfo, ipAddress)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrFirebaseNotConfigured):
-			response.Error(c, http.StatusServiceUnavailable, "Google sign-in is not configured", "")
-		case errors.Is(err, service.ErrInvalidGoogleToken):
-			response.Error(c, http.StatusUnauthorized, "Invalid Google ID token", "")
-		case errors.Is(err, service.ErrUnexpectedProvider):
-			response.Error(c, http.StatusUnauthorized, "Unexpected sign-in provider", "")
-		case errors.Is(err, service.ErrGoogleEmailMissing):
-			response.Error(c, http.StatusUnauthorized, "Google account did not return an email", "")
-		case errors.Is(err, service.ErrUserNotActive):
-			response.Error(c, http.StatusUnauthorized, "User account is not active", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to sign in with Google", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -148,25 +116,14 @@ func (h *AuthHandler) SignInWithGoogle(c *gin.Context) {
 func (h *AuthHandler) Refresh(c *gin.Context) {
 	var req dto.RefreshTokenRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
 	ctx := c.Request.Context()
 	result, err := h.authService.RefreshToken(ctx, req.RefreshToken)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrInvalidRefreshToken):
-			response.Error(c, http.StatusUnauthorized, "Invalid refresh token", "")
-		case errors.Is(err, service.ErrRefreshTokenExpired):
-			response.Error(c, http.StatusUnauthorized, "Refresh token expired", "")
-		case errors.Is(err, service.ErrRefreshTokenRevoked):
-			response.Error(c, http.StatusUnauthorized, "Refresh token revoked", "")
-		case errors.Is(err, service.ErrUserNotActive):
-			response.Error(c, http.StatusUnauthorized, "User account is not active", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to refresh token", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -176,14 +133,14 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 func (h *AuthHandler) Logout(c *gin.Context) {
 	var req dto.LogoutRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
 	ctx := c.Request.Context()
 	err := h.authService.Logout(ctx, req.RefreshToken)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to logout", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -196,7 +153,7 @@ func (h *AuthHandler) LogoutAll(c *gin.Context) {
 	ctx := c.Request.Context()
 	err := h.authService.LogoutAll(ctx, userID)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to logout from all devices", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -206,7 +163,7 @@ func (h *AuthHandler) LogoutAll(c *gin.Context) {
 func (h *AuthHandler) SwitchCompany(c *gin.Context) {
 	var req dto.SwitchCompanyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -215,14 +172,7 @@ func (h *AuthHandler) SwitchCompany(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.authService.SwitchCompany(ctx, userID, req.CompanyID)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrCompanyNotFound):
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-		case errors.Is(err, service.ErrNotCompanyMember):
-			response.Error(c, http.StatusForbidden, "You are not a member of this company", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to switch company", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -235,12 +185,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.authService.GetMe(ctx, claims.UserID, claims.CompanyID, claims.IsSuperAdmin)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrUserNotActive):
-			response.Error(c, http.StatusUnauthorized, "User not active", err.Error())
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to load profile", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -253,7 +198,7 @@ func (h *AuthHandler) GetMyCompanies(c *gin.Context) {
 	ctx := c.Request.Context()
 	companies, err := h.authService.GetMyCompanies(ctx, userID)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get companies", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 

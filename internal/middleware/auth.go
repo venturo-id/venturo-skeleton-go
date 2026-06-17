@@ -122,7 +122,7 @@ func handleApiKeyAuth(c *gin.Context, apiKey string) bool {
 			logger.String("key_id", keyID),
 			logger.Err(err),
 		)
-		response.Error(c, http.StatusUnauthorized, "Unauthorized", err.Error())
+		response.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 		return false
 	}
 

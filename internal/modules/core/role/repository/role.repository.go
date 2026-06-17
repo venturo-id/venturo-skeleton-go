@@ -12,6 +12,7 @@ import (
 
 	"venturo-skeleton-go/internal/modules/core/role/domain"
 	"venturo-skeleton-go/internal/modules/core/role/dto"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
@@ -65,10 +66,10 @@ func (r *RoleRepository) FindByID(ctx context.Context, id string) (*domain.Role,
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+			return nil, derrors.WrapErrorf(err, derrors.ErrorCodeCustomNotFound, "Role %s not found", id)
 		}
 		logger.Error("Failed to find role by ID", logger.Err(err))
-		return nil, err
+		return nil, derrors.WrapErrorf(err, derrors.ErrorCodeUnknown, "query role")
 	}
 
 	return &role, nil

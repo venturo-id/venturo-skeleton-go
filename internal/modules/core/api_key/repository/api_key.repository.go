@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"venturo-skeleton-go/internal/modules/core/api_key/domain"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
@@ -58,7 +59,17 @@ func (r *ApiKeyRepository) FindByID(ctx context.Context, id, companyID string) (
 		WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL
 	`
 
-	return r.scanApiKey(ctx, query, id, companyID)
+	apiKey, err := r.scanApiKey(ctx, query, id, companyID)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey == nil {
+		// Caller asked for one specific key by id → a missing row is a
+		// genuine NotFound (the shared scanApiKey collapses ErrNoRows to
+		// nil for the FindByKeyID auth probe, so wrap it here).
+		return nil, derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "API key %s not found", id)
+	}
+	return apiKey, nil
 }
 
 // FindByKeyID finds an API key by its key_id (for authentication)

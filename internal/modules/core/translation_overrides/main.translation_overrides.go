@@ -37,10 +37,10 @@ func Initialize(db *pgxpool.Pool, clientService *clientSvc.Service) *Module {
 // Authorization stack for admin routes:
 //  1. JWTAuth            — must be logged in
 //  2. RequireClientScope — JWT.client_id must match :id (super_admin
-//                          bypasses)
+//     bypasses)
 //  3. RequirePermission  — caller must hold the matching action on
-//                          "core.translation_overrides" resource
-//                          (super_admin bypasses)
+//     "core.translation_overrides" resource
+//     (super_admin bypasses)
 //
 // Both layers are applied because they answer different questions:
 // scope = "which client can I touch", permission = "what actions am I

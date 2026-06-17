@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -15,20 +14,21 @@ import (
 	"venturo-skeleton-go/internal/modules/core/api_key/domain"
 	"venturo-skeleton-go/internal/modules/core/api_key/dto"
 	"venturo-skeleton-go/internal/modules/core/api_key/repository"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/jwt"
 	"venturo-skeleton-go/pkg/logger"
 )
 
 // Service errors
 var (
-	ErrApiKeyNotFound      = errors.New("API key not found")
-	ErrApiKeyRevoked       = errors.New("API key has been revoked")
-	ErrApiKeyExpired       = errors.New("API key has expired")
-	ErrApiKeyIPNotAllowed  = errors.New("IP address not allowed for this API key")
-	ErrApiKeyInvalidSecret = errors.New("invalid API key secret")
-	ErrApiKeyInvalidFormat = errors.New("invalid API key format")
-	ErrApiKeyInvalidScope  = errors.New("invalid permission scope")
-	ErrApiKeyUserInactive  = errors.New("API key owner account is inactive")
+	ErrApiKeyNotFound      = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "API key not found")
+	ErrApiKeyRevoked       = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "API key has been revoked")
+	ErrApiKeyExpired       = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "API key has expired")
+	ErrApiKeyIPNotAllowed  = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "IP address not allowed for this API key")
+	ErrApiKeyInvalidSecret = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "invalid API key secret")
+	ErrApiKeyInvalidFormat = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "Invalid API key format")
+	ErrApiKeyInvalidScope  = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "Invalid permission scope")
+	ErrApiKeyUserInactive  = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "API key owner account is inactive")
 )
 
 // RoleRepository interface for getting user permissions
@@ -81,7 +81,7 @@ func (s *ApiKeyService) Create(
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
 		parsed, err := time.Parse(time.RFC3339, *req.ExpiresAt)
 		if err != nil {
-			return nil, fmt.Errorf("invalid expires_at format, expected RFC3339: %w", err)
+			return nil, derrors.WrapErrorf(err, derrors.ErrorCodeCustomBadRequest, "invalid expires_at format, expected RFC3339")
 		}
 		expiresAt = &parsed
 	}
@@ -378,7 +378,7 @@ func (s *ApiKeyService) validateScopes(ctx context.Context, userID, companyID st
 
 	for _, scope := range scopes {
 		if !userPermSet[scope] {
-			return fmt.Errorf("%w: permission '%s' not available to user", ErrApiKeyInvalidScope, scope)
+			return derrors.WrapErrorf(ErrApiKeyInvalidScope, derrors.ErrorCodeCustomBadRequest, "permission '%s' not available to user", scope)
 		}
 	}
 

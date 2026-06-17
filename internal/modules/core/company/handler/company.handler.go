@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -25,7 +24,7 @@ func NewCompanyHandler(companyService *service.CompanyService) *CompanyHandler {
 func (h *CompanyHandler) GetAll(c *gin.Context) {
 	var params dto.CompanyQueryParams
 	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid query parameters", "")
 		return
 	}
 
@@ -39,7 +38,7 @@ func (h *CompanyHandler) GetAll(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.companyService.GetAll(ctx, &params, userID, isSuperAdmin)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get companies", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -57,11 +56,7 @@ func (h *CompanyHandler) GetByID(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.companyService.GetByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, service.ErrCompanyNotFound) {
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get company", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -71,7 +66,7 @@ func (h *CompanyHandler) GetByID(c *gin.Context) {
 func (h *CompanyHandler) Create(c *gin.Context) {
 	var req dto.CreateCompanyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -84,14 +79,7 @@ func (h *CompanyHandler) Create(c *gin.Context) {
 
 	result, err := h.companyService.Create(ctx, &req, createdBy, isSuperAdmin)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrParentNotFound):
-			response.Error(c, http.StatusBadRequest, "Parent company not found", "")
-		case errors.Is(err, service.ErrOwnerAssignOnly):
-			response.Error(c, http.StatusForbidden, "Only super_admin can assign a different owner", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to create company", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -107,7 +95,7 @@ func (h *CompanyHandler) Update(c *gin.Context) {
 
 	var req dto.UpdateCompanyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -120,14 +108,7 @@ func (h *CompanyHandler) Update(c *gin.Context) {
 
 	result, err := h.companyService.Update(ctx, id, &req, updatedBy, isSuperAdmin)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrCompanyNotFound):
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-		case errors.Is(err, service.ErrOwnerTransferOnly):
-			response.Error(c, http.StatusForbidden, "Only super_admin can transfer ownership", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to update company", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -146,11 +127,7 @@ func (h *CompanyHandler) Delete(c *gin.Context) {
 
 	err := h.companyService.Delete(ctx, id, deletedBy)
 	if err != nil {
-		if errors.Is(err, service.ErrCompanyNotFound) {
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to delete company", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -160,14 +137,14 @@ func (h *CompanyHandler) Delete(c *gin.Context) {
 func (h *CompanyHandler) GetTrash(c *gin.Context) {
 	var params dto.CompanyTrashQueryParams
 	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid query parameters", "")
 		return
 	}
 
 	ctx := c.Request.Context()
 	result, err := h.companyService.GetTrash(ctx, &params)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get deleted companies", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -187,11 +164,7 @@ func (h *CompanyHandler) Restore(c *gin.Context) {
 
 	result, err := h.companyService.Restore(ctx, id, restoredBy)
 	if err != nil {
-		if errors.Is(err, service.ErrCompanyNotFound) {
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to restore company", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -208,11 +181,7 @@ func (h *CompanyHandler) GetChildren(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.companyService.GetChildren(ctx, id)
 	if err != nil {
-		if errors.Is(err, service.ErrCompanyNotFound) {
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get children", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -229,11 +198,7 @@ func (h *CompanyHandler) GetAncestors(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.companyService.GetAncestors(ctx, id)
 	if err != nil {
-		if errors.Is(err, service.ErrCompanyNotFound) {
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get ancestors", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -249,18 +214,14 @@ func (h *CompanyHandler) GetUsers(c *gin.Context) {
 
 	var params dto.CompanyUserQueryParams
 	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid query parameters", "")
 		return
 	}
 
 	ctx := c.Request.Context()
 	result, err := h.companyService.GetUsers(ctx, id, &params)
 	if err != nil {
-		if errors.Is(err, service.ErrCompanyNotFound) {
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get users", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -277,7 +238,7 @@ func (h *CompanyHandler) AddUser(c *gin.Context) {
 
 	var req dto.AddCompanyUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -286,14 +247,7 @@ func (h *CompanyHandler) AddUser(c *gin.Context) {
 
 	result, err := h.companyService.AddUser(ctx, id, &req, invitedBy)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrCompanyNotFound):
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-		case errors.Is(err, service.ErrUserAlreadyMember):
-			response.Error(c, http.StatusConflict, "User is already a member", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to add user", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -310,7 +264,7 @@ func (h *CompanyHandler) UpdateUser(c *gin.Context) {
 
 	var req dto.UpdateCompanyUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -319,14 +273,7 @@ func (h *CompanyHandler) UpdateUser(c *gin.Context) {
 
 	result, err := h.companyService.UpdateUser(ctx, id, userID, &req, updatedBy)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrMembershipNotFound):
-			response.Error(c, http.StatusNotFound, "Membership not found", "")
-		case errors.Is(err, service.ErrCannotDeactivateOwner):
-			response.Error(c, http.StatusForbidden, "Cannot deactivate company owner", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to update user", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -346,16 +293,7 @@ func (h *CompanyHandler) RemoveUser(c *gin.Context) {
 
 	err := h.companyService.RemoveUser(ctx, id, userID, deletedBy)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrCompanyNotFound):
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-		case errors.Is(err, service.ErrMembershipNotFound):
-			response.Error(c, http.StatusNotFound, "Membership not found", "")
-		case errors.Is(err, service.ErrCannotRemoveOwner):
-			response.Error(c, http.StatusForbidden, "Cannot remove company owner", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to remove user", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -371,7 +309,7 @@ func (h *CompanyHandler) SyncUserCompanies(c *gin.Context) {
 
 	var req dto.SyncUserCompaniesRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -380,7 +318,7 @@ func (h *CompanyHandler) SyncUserCompanies(c *gin.Context) {
 
 	err := h.companyService.SyncUserCompanies(ctx, userID, &req, updatedBy)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to sync companies", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -397,7 +335,7 @@ func (h *CompanyHandler) GetUserCompanies(c *gin.Context) {
 	ctx := c.Request.Context()
 	companyIDs, err := h.companyService.GetUserCompanyIDs(ctx, userID)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get user companies", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 

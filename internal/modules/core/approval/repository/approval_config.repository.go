@@ -12,6 +12,7 @@ import (
 
 	"venturo-skeleton-go/internal/modules/core/approval/domain"
 	"venturo-skeleton-go/internal/modules/core/approval/dto"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
@@ -107,10 +108,10 @@ func (r *ApprovalConfigRepository) FindByID(ctx context.Context, id, companyID s
 	err := scanApprovalConfig(r.db.QueryRow(ctx, query, id, companyID), &c)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+			return nil, derrors.WrapErrorf(err, derrors.ErrorCodeCustomNotFound, "Approval config %s not found", id)
 		}
 		logger.Error("Failed to find approval_config", logger.Err(err))
-		return nil, err
+		return nil, derrors.WrapErrorf(err, derrors.ErrorCodeUnknown, "query approval config")
 	}
 	return &c, nil
 }

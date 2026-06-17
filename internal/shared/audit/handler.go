@@ -20,7 +20,7 @@ func NewHandler(svc *Service) *Handler {
 func (h *Handler) List(c *gin.Context) {
 	var params ListQueryParams
 	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid query parameters", "")
 		return
 	}
 	if params.Page == 0 {
@@ -49,7 +49,7 @@ func (h *Handler) List(c *gin.Context) {
 		Limit:     params.Limit,
 	})
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to list audit logs", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 	response.SuccessWithPagination(c, http.StatusOK, "Audit logs retrieved successfully",

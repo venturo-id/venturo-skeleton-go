@@ -6,7 +6,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	branchService "venturo-skeleton-go/internal/modules/core/branch/service"
 	"venturo-skeleton-go/internal/middleware"
 	"venturo-skeleton-go/internal/modules/core/user/dto"
 	"venturo-skeleton-go/internal/modules/core/user/service"
@@ -78,7 +77,7 @@ func (h *UserHandler) resolveTenantScope(c *gin.Context) (*service.TenantScope, 
 func (h *UserHandler) GetAll(c *gin.Context) {
 	var params dto.UserQueryParams
 	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid query parameters", "")
 		return
 	}
 
@@ -91,7 +90,7 @@ func (h *UserHandler) GetAll(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.userService.GetAll(ctx, &params, scope)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get users", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -115,11 +114,7 @@ func (h *UserHandler) GetByID(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.userService.GetByID(ctx, id, scope)
 	if err != nil {
-		if errors.Is(err, service.ErrUserNotFound) {
-			response.Error(c, http.StatusNotFound, "User not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get user", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -129,7 +124,7 @@ func (h *UserHandler) GetByID(c *gin.Context) {
 func (h *UserHandler) Create(c *gin.Context) {
 	var req dto.CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -150,26 +145,7 @@ func (h *UserHandler) Create(c *gin.Context) {
 
 	result, err := h.userService.Create(ctx, &req, createdBy, scope)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrEmailAlreadyExists):
-			response.Error(c, http.StatusConflict, "Email already exists", "")
-		case errors.Is(err, service.ErrUsernameAlreadyExists):
-			response.Error(c, http.StatusConflict, "Username already exists", "")
-		case errors.Is(err, service.ErrCompanyNotFound):
-			// One of the submitted company_ids does not exist (or was
-			// soft-deleted). The transaction has been rolled back.
-			response.Error(c, http.StatusBadRequest, "Invalid company_ids", err.Error())
-		case errors.Is(err, service.ErrCompaniesRequired):
-			response.Error(c, http.StatusBadRequest, "company_ids is required", "")
-		case errors.Is(err, service.ErrRoleNotAllowed):
-			response.Error(c, http.StatusForbidden, "Role not allowed for caller", "")
-		case errors.Is(err, branchService.ErrInvalidBranchIDs):
-			response.Error(c, http.StatusBadRequest, "Invalid branch_ids", err.Error())
-		case errors.Is(err, branchService.ErrBranchNotInScope):
-			response.Error(c, http.StatusForbidden, "Branch not in caller's scope", err.Error())
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to create user", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -185,7 +161,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 
 	var req dto.UpdateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -206,24 +182,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 
 	result, err := h.userService.Update(ctx, id, &req, updatedBy, scope)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrUserNotFound):
-			response.Error(c, http.StatusNotFound, "User not found", "")
-		case errors.Is(err, service.ErrEmailAlreadyExists):
-			response.Error(c, http.StatusConflict, "Email already exists", "")
-		case errors.Is(err, service.ErrUsernameAlreadyExists):
-			response.Error(c, http.StatusConflict, "Username already exists", "")
-		case errors.Is(err, service.ErrCompanyNotFound):
-			response.Error(c, http.StatusBadRequest, "Invalid company_ids", err.Error())
-		case errors.Is(err, service.ErrRoleNotAllowed):
-			response.Error(c, http.StatusForbidden, "Role not allowed for caller", "")
-		case errors.Is(err, branchService.ErrInvalidBranchIDs):
-			response.Error(c, http.StatusBadRequest, "Invalid branch_ids", err.Error())
-		case errors.Is(err, branchService.ErrBranchNotInScope):
-			response.Error(c, http.StatusForbidden, "Branch not in caller's scope", err.Error())
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to update user", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -248,11 +207,7 @@ func (h *UserHandler) Delete(c *gin.Context) {
 
 	err = h.userService.Delete(ctx, id, deletedBy, scope)
 	if err != nil {
-		if errors.Is(err, service.ErrUserNotFound) {
-			response.Error(c, http.StatusNotFound, "User not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to delete user", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -265,11 +220,7 @@ func (h *UserHandler) GetMe(c *gin.Context) {
 
 	result, err := h.userService.GetMe(ctx, userID)
 	if err != nil {
-		if errors.Is(err, service.ErrUserNotFound) {
-			response.Error(c, http.StatusNotFound, "User not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get user", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -279,7 +230,7 @@ func (h *UserHandler) GetMe(c *gin.Context) {
 func (h *UserHandler) UpdateMe(c *gin.Context) {
 	var req dto.UpdateMeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -288,11 +239,7 @@ func (h *UserHandler) UpdateMe(c *gin.Context) {
 
 	result, err := h.userService.UpdateMe(ctx, userID, &req)
 	if err != nil {
-		if errors.Is(err, service.ErrUserNotFound) {
-			response.Error(c, http.StatusNotFound, "User not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to update user", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -302,7 +249,7 @@ func (h *UserHandler) UpdateMe(c *gin.Context) {
 func (h *UserHandler) ChangePassword(c *gin.Context) {
 	var req dto.ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -311,14 +258,7 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 
 	err := h.userService.ChangePassword(ctx, userID, &req)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrUserNotFound):
-			response.Error(c, http.StatusNotFound, "User not found", "")
-		case errors.Is(err, service.ErrInvalidPassword):
-			response.Error(c, http.StatusBadRequest, "Current password is incorrect", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to change password", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 

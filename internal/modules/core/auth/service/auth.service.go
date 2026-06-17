@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"strings"
 	"time"
 
@@ -22,6 +21,7 @@ import (
 	userDomain "venturo-skeleton-go/internal/modules/core/user/domain"
 	userRepo "venturo-skeleton-go/internal/modules/core/user/repository"
 	"venturo-skeleton-go/pkg/crypto"
+	"venturo-skeleton-go/pkg/derrors"
 	pkgfirebase "venturo-skeleton-go/pkg/firebase"
 	"venturo-skeleton-go/pkg/jwt"
 	"venturo-skeleton-go/pkg/logger"
@@ -29,23 +29,23 @@ import (
 )
 
 var (
-	ErrInvalidCredentials    = errors.New("invalid credentials")
-	ErrUserNotActive         = errors.New("user is not active")
-	ErrUserLocked            = errors.New("user account is locked")
-	ErrEmailNotVerified      = errors.New("email not verified")
-	ErrEmailAlreadyExists    = errors.New("email already exists")
-	ErrUsernameAlreadyExists = errors.New("username already exists")
-	ErrInvalidRefreshToken   = errors.New("invalid refresh token")
-	ErrRefreshTokenExpired   = errors.New("refresh token expired")
-	ErrRefreshTokenRevoked   = errors.New("refresh token revoked")
-	ErrCompanyNotFound       = errors.New("company not found")
-	ErrNotCompanyMember      = errors.New("user is not a member of this company")
+	ErrInvalidCredentials    = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "invalid credentials")
+	ErrUserNotActive         = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "user is not active")
+	ErrUserLocked            = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "user account is locked")
+	ErrEmailNotVerified      = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "email not verified")
+	ErrEmailAlreadyExists    = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "Email already exists")
+	ErrUsernameAlreadyExists = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "Username already exists")
+	ErrInvalidRefreshToken   = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "invalid refresh token")
+	ErrRefreshTokenExpired   = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "refresh token expired")
+	ErrRefreshTokenRevoked   = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "refresh token revoked")
+	ErrCompanyNotFound       = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Company not found")
+	ErrNotCompanyMember      = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "User is not a member of this company")
 
 	// Google sign-in errors
-	ErrFirebaseNotConfigured = errors.New("google sign-in not configured")
-	ErrInvalidGoogleToken    = errors.New("invalid google id token")
-	ErrGoogleEmailMissing    = errors.New("google account did not return an email")
-	ErrUnexpectedProvider    = errors.New("unexpected firebase sign-in provider")
+	ErrFirebaseNotConfigured = derrors.NewErrorf(derrors.ErrorCodeServiceUnavailable, "google sign-in not configured")
+	ErrInvalidGoogleToken    = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "invalid google id token")
+	ErrGoogleEmailMissing    = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "google account did not return an email")
+	ErrUnexpectedProvider    = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "unexpected firebase sign-in provider")
 )
 
 // firebaseSignInProviderGoogle is the value Firebase reports in the
@@ -88,8 +88,8 @@ type BranchRepository interface {
 // ClientService is the slice of the client service that auth needs:
 //   - CreateForUser: SignUp provisions a new client for a registrant.
 //   - GetByID:       SignIn / SwitchCompany resolve client_id + slug
-//                    from the caller's company so both show up in the
-//                    JWT and the response payload.
+//     from the caller's company so both show up in the
+//     JWT and the response payload.
 type ClientService interface {
 	CreateForUser(ctx context.Context, userID, username, displayName string) (*clientDomain.Client, error)
 	GetByID(ctx context.Context, id string) (*clientDomain.Client, error)
@@ -255,7 +255,7 @@ func (s *AuthService) SignUp(ctx context.Context, req *dto.SignUpRequest) (*dto.
 	// creating any companies. One signup = one client; companies created
 	// later (via POST /core/v1/companies) will inherit this client_id.
 	if s.clientService == nil {
-		return nil, errors.New("client service not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "client service not set")
 	}
 	var newClient *clientDomain.Client
 	var displayName string
@@ -285,7 +285,7 @@ func (s *AuthService) SignUp(ctx context.Context, req *dto.SignUpRequest) (*dto.
 	}
 
 	if s.companyRepo == nil {
-		return nil, errors.New("company repository not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "company repository not set")
 	}
 	err = s.companyRepo.Create(ctx, newCompany)
 	if err != nil {
@@ -296,7 +296,7 @@ func (s *AuthService) SignUp(ctx context.Context, req *dto.SignUpRequest) (*dto.
 	// Link user to company as primary member with the default admin role
 	// (so the owner has full company-scoped permissions out of the box).
 	if s.companyUserRepo == nil {
-		return nil, errors.New("company user repository not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "company user repository not set")
 	}
 	var defaultRoleID *string
 	if s.config != nil && s.config.Auth.DefaultAdminRoleID != "" {
@@ -324,7 +324,7 @@ func (s *AuthService) SignUp(ctx context.Context, req *dto.SignUpRequest) (*dto.
 
 	// Create default branch "Cabang Pusat"
 	if s.branchRepo == nil {
-		return nil, errors.New("branch repository not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "branch repository not set")
 	}
 	defaultBranch := &branchDomain.Branch{
 		ID:        uuid.New().String(),
@@ -627,7 +627,7 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
 func (s *AuthService) SwitchCompany(ctx context.Context, userID, companyID string) (*dto.SwitchCompanyResponse, error) {
 	// Check if user is a member of the company
 	if s.companyUserRepo == nil {
-		return nil, errors.New("company user repository not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "company user repository not set")
 	}
 
 	isMember, err := s.companyUserRepo.IsMember(ctx, userID, companyID)
@@ -841,14 +841,14 @@ func containsRole(roles []string, target string) bool {
 //     - Found → refresh the identity snapshot, sign that user in.
 //  3. Not found → look up core.users by email.
 //     - Found → link the Google identity to the existing account,
-//       then sign that user in. The pre-existing user keeps their
-//       company/role/branch setup — no auto-provisioning here.
+//     then sign that user in. The pre-existing user keeps their
+//     company/role/branch setup — no auto-provisioning here.
 //  4. Not found at all → first-time Google user:
-//       a) create a new core.users row (no password)
-//       b) provision a client, company (named after the Google
-//          profile), default branch — same flow as SignUp
-//       c) link the Google identity
-//       d) sign the new user in
+//     a) create a new core.users row (no password)
+//     b) provision a client, company (named after the Google
+//     profile), default branch — same flow as SignUp
+//     c) link the Google identity
+//     d) sign the new user in
 //
 // All four branches return a *dto.GoogleSignInResponse with
 // `is_new_user` distinguishing case (4) from the rest. Token issuance
@@ -864,7 +864,7 @@ func (s *AuthService) SignInWithGoogle(
 	}
 	if s.userIdentityRepo == nil {
 		// Mis-wired bootstrap — refuse to run a half-configured flow.
-		return nil, errors.New("user identity repository not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "user identity repository not set")
 	}
 
 	// 1. Verify token. anything that returns here has a valid
@@ -956,16 +956,16 @@ func (s *AuthService) provisionGoogleUser(
 	email string,
 ) (*userDomain.User, error) {
 	if s.clientService == nil {
-		return nil, errors.New("client service not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "client service not set")
 	}
 	if s.companyRepo == nil {
-		return nil, errors.New("company repository not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "company repository not set")
 	}
 	if s.companyUserRepo == nil {
-		return nil, errors.New("company user repository not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "company user repository not set")
 	}
 	if s.branchRepo == nil {
-		return nil, errors.New("branch repository not set")
+		return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "branch repository not set")
 	}
 
 	now := time.Now()
@@ -992,12 +992,12 @@ func (s *AuthService) provisionGoogleUser(
 
 	full := displayName
 	user := &userDomain.User{
-		ID:              uuid.New().String(),
-		Email:           email,
-		Username:        username,
-		FullName:        &full,
-		AvatarURL:       avatarURL,
-		IsActive:        true,
+		ID:        uuid.New().String(),
+		Email:     email,
+		Username:  username,
+		FullName:  &full,
+		AvatarURL: avatarURL,
+		IsActive:  true,
 		// Google verifies emails itself before issuing an ID token —
 		// trust the claim and mark the local row verified so the user
 		// can use the app immediately even if EMAIL_VERIFICATION_REQUIRED
@@ -1261,7 +1261,7 @@ func (s *AuthService) allocateUsernameFromEmail(ctx context.Context, email strin
 		}
 		candidate = base + suffix
 	}
-	return "", errors.New("could not allocate unique username after retries")
+	return "", derrors.NewErrorf(derrors.ErrorCodeUnknown, "could not allocate unique username after retries")
 }
 
 // usernameFromEmail returns the part before '@', lowercased and
@@ -1345,7 +1345,6 @@ func hashToken(tokenStr string) string {
 	h.Write([]byte(tokenStr))
 	return hex.EncodeToString(h.Sum(nil))
 }
-
 
 // GetDeviceInfoFromUserAgent extracts device info from user agent string
 func GetDeviceInfoFromUserAgent(userAgent string) domain.DeviceInfo {

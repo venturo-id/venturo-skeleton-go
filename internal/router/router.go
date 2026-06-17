@@ -23,6 +23,7 @@ import (
 	"venturo-skeleton-go/internal/shared/authz"
 	"venturo-skeleton-go/internal/shared/rabbitmq"
 	sharedRedis "venturo-skeleton-go/internal/shared/redis"
+	"venturo-skeleton-go/internal/shared/response"
 
 	"venturo-skeleton-go/pkg/cache"
 	pkgfirebase "venturo-skeleton-go/pkg/firebase"
@@ -47,6 +48,10 @@ func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 	// once here from cfg — used by the recovery middleware and the dev-only
 	// test endpoint below.
 	sentryActive := cfg.Sentry.DSN != ""
+	// Gate internal error detail by environment for the centralized error
+	// renderer (response.RenderError). Generic messages in production; detail
+	// allowed in dev/staging. See docs/errors.md.
+	response.Configure(cfg.Server.Env)
 
 	// ─── Redis & authz cache ────────────────────────────────────────
 	// Redis backs the per-user permission cache (see

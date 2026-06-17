@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,13 +9,14 @@ import (
 	"venturo-skeleton-go/internal/modules/core/approval/domain"
 	"venturo-skeleton-go/internal/modules/core/approval/dto"
 	"venturo-skeleton-go/internal/modules/core/approval/repository"
+	"venturo-skeleton-go/pkg/derrors"
 )
 
 var (
-	ErrConfigNotFound     = errors.New("approval config not found")
-	ErrUnknownFeatureKey  = errors.New("unknown feature_key")
-	ErrDuplicateLevel     = errors.New("duplicate level numbers in config")
-	ErrLevelNotSequential = errors.New("levels must be sequential starting from 1")
+	ErrConfigNotFound     = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Approval config not found")
+	ErrUnknownFeatureKey  = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "unknown feature_key")
+	ErrDuplicateLevel     = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "duplicate level numbers in config")
+	ErrLevelNotSequential = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "levels must be sequential starting from 1")
 )
 
 type ApprovalConfigService struct {

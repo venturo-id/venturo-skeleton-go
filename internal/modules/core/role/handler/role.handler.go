@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -25,7 +24,7 @@ func NewRoleHandler(roleService *service.RoleService) *RoleHandler {
 func (h *RoleHandler) GetAll(c *gin.Context) {
 	var params dto.RoleQueryParams
 	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid query parameters", "")
 		return
 	}
 
@@ -47,7 +46,7 @@ func (h *RoleHandler) GetAll(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.roleService.GetAll(ctx, &params)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get roles", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -65,11 +64,7 @@ func (h *RoleHandler) GetByID(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.roleService.GetByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, service.ErrRoleNotFound) {
-			response.Error(c, http.StatusNotFound, "Role not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get role", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -79,7 +74,7 @@ func (h *RoleHandler) GetByID(c *gin.Context) {
 func (h *RoleHandler) Create(c *gin.Context) {
 	var req dto.CreateRoleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -98,14 +93,7 @@ func (h *RoleHandler) Create(c *gin.Context) {
 
 	result, err := h.roleService.Create(ctx, &req, createdBy)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrCodeAlreadyExists):
-			response.Error(c, http.StatusConflict, "Role code already exists", "")
-		case errors.Is(err, service.ErrInvalidPermissions):
-			response.Error(c, http.StatusBadRequest, "Invalid permissions format", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to create role", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -121,7 +109,7 @@ func (h *RoleHandler) Update(c *gin.Context) {
 
 	var req dto.UpdateRoleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -132,16 +120,7 @@ func (h *RoleHandler) Update(c *gin.Context) {
 
 	result, err := h.roleService.Update(ctx, id, &req, updatedBy, isSuperAdmin)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrRoleNotFound):
-			response.Error(c, http.StatusNotFound, "Role not found", "")
-		case errors.Is(err, service.ErrCannotModifySystem):
-			response.Error(c, http.StatusForbidden, "Cannot modify system role", "")
-		case errors.Is(err, service.ErrInvalidPermissions):
-			response.Error(c, http.StatusBadRequest, "Invalid permissions format", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to update role", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -157,7 +136,7 @@ func (h *RoleHandler) UpdatePermissions(c *gin.Context) {
 
 	var req dto.UpdatePermissionsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -168,16 +147,7 @@ func (h *RoleHandler) UpdatePermissions(c *gin.Context) {
 
 	result, err := h.roleService.UpdatePermissions(ctx, id, &req, updatedBy, isSuperAdmin)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrRoleNotFound):
-			response.Error(c, http.StatusNotFound, "Role not found", "")
-		case errors.Is(err, service.ErrCannotModifySystem):
-			response.Error(c, http.StatusForbidden, "Cannot modify system role", "")
-		case errors.Is(err, service.ErrInvalidPermissions):
-			response.Error(c, http.StatusBadRequest, "Invalid permissions format", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to update permissions", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -196,14 +166,7 @@ func (h *RoleHandler) Delete(c *gin.Context) {
 
 	err := h.roleService.Delete(ctx, id, deletedBy)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrRoleNotFound):
-			response.Error(c, http.StatusNotFound, "Role not found", "")
-		case errors.Is(err, service.ErrCannotDeleteSystem):
-			response.Error(c, http.StatusForbidden, "Cannot delete system role", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to delete role", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 

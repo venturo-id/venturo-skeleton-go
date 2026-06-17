@@ -12,18 +12,19 @@ import (
 	"venturo-skeleton-go/internal/modules/core/approval/dto"
 	"venturo-skeleton-go/internal/modules/core/approval/repository"
 	roleRepo "venturo-skeleton-go/internal/modules/core/role/repository"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
 // ─── ERRORS ─────────────────────────────────────────────────────
 
 var (
-	ErrApprovalConfigNotConfigured = errors.New("approval config not configured for this branch & feature")
-	ErrRequestNotFound             = errors.New("approval request not found")
-	ErrRequestNotWaiting           = errors.New("approval request is not waiting")
-	ErrNotEligibleApprover         = errors.New("user is not an eligible approver at the current level")
-	ErrRequestAlreadyExists        = errors.New("an active approval request already exists for this document")
-	ErrCannotCancel                = errors.New("only the submitter can cancel while waiting")
+	ErrApprovalConfigNotConfigured = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Approval config not configured for this branch & feature")
+	ErrRequestNotFound             = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Approval request not found")
+	ErrRequestNotWaiting           = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "Approval request is not waiting")
+	ErrNotEligibleApprover         = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "You are not an eligible approver at the current level")
+	ErrRequestAlreadyExists        = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "An active approval request already exists for this document")
+	ErrCannotCancel                = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Only the submitter can cancel a waiting request")
 )
 
 // ─── SERVICE ────────────────────────────────────────────────────
@@ -139,8 +140,12 @@ func (s *ApprovalRequestService) SubmitTx(ctx context.Context, tx pgx.Tx, p dto.
 	snapshotLevels := make([]domain.ApprovalRequestLevel, 0, len(levels))
 	for _, l := range levels {
 		roleName := ""
+		// Best-effort snapshot: a since-deleted role leaves roleName empty
+		// rather than failing the submit. FindByID now wraps a missing row as
+		// NotFound (unwraps to pgx.ErrNoRows), so tolerate that and only
+		// propagate genuine query failures.
 		role, err := s.roleRepo.FindByID(ctx, l.RoleID)
-		if err != nil {
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, err
 		}
 		if role != nil {
