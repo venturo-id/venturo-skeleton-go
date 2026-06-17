@@ -12,6 +12,7 @@ import (
 
 	"venturo-skeleton-go/internal/modules/core/company/domain"
 	"venturo-skeleton-go/internal/modules/core/company/dto"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
@@ -67,10 +68,10 @@ func (r *CompanyRepository) FindByID(ctx context.Context, id string) (*domain.Co
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+			return nil, derrors.WrapErrorf(err, derrors.ErrorCodeCustomNotFound, "Company %s not found", id)
 		}
 		logger.Error("Failed to find company by ID", logger.Err(err))
-		return nil, err
+		return nil, derrors.WrapErrorf(err, derrors.ErrorCodeUnknown, "query company")
 	}
 
 	return &company, nil

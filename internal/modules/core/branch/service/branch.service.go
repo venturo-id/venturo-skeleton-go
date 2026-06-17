@@ -12,6 +12,7 @@ import (
 	"venturo-skeleton-go/internal/modules/core/branch/domain"
 	"venturo-skeleton-go/internal/modules/core/branch/dto"
 	"venturo-skeleton-go/internal/modules/core/branch/repository"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
@@ -21,9 +22,9 @@ const (
 )
 
 var (
-	ErrBranchNotFound      = errors.New("branch not found")
-	ErrCannotDeleteDefault = errors.New("cannot delete default branch")
-	ErrBranchCodeTaken     = errors.New("branch code already exists for this company")
+	ErrBranchNotFound      = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Branch not found")
+	ErrCannotDeleteDefault = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Cannot delete default branch")
+	ErrBranchCodeTaken     = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "Branch code already exists")
 )
 
 // CompanyMembershipLookup returns the set of company IDs a user is an active
@@ -105,7 +106,7 @@ func (s *BranchService) GetAllByCompanies(ctx context.Context, userID string, is
 		// else companyIDs stays nil → unrestricted
 	} else {
 		if s.memberLookup == nil {
-			return nil, errors.New("company membership lookup is not configured")
+			return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "company membership lookup is not configured")
 		}
 		memberIDs, err := s.memberLookup.FindCompanyIDsByUser(ctx, userID)
 		if err != nil {
@@ -282,7 +283,7 @@ func (s *BranchService) Update(ctx context.Context, id string, req *dto.UpdateBr
 	if req.Code != nil {
 		trimmed := strings.TrimSpace(*req.Code)
 		if trimmed == "" {
-			return nil, errors.New("code cannot be empty")
+			return nil, derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "Code cannot be empty")
 		}
 		branch.Code = trimmed
 	}

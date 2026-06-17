@@ -11,10 +11,10 @@ import (
 )
 
 type CompanyModule struct {
-	Handler         *handler.CompanyHandler
-	Service         *service.CompanyService
-	Repository      *repository.CompanyRepository
-	UserRepository  *repository.CompanyUserRepository
+	Handler        *handler.CompanyHandler
+	Service        *service.CompanyService
+	Repository     *repository.CompanyRepository
+	UserRepository *repository.CompanyUserRepository
 }
 
 // Initialize initializes the company module with all dependencies

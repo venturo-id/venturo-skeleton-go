@@ -11,6 +11,7 @@ import (
 
 	"venturo-skeleton-go/internal/modules/core/approval/domain"
 	"venturo-skeleton-go/internal/modules/core/approval/dto"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
@@ -103,9 +104,9 @@ func (r *ApprovalRequestRepository) FindByID(ctx context.Context, tx pgx.Tx, id 
 	var req domain.ApprovalRequest
 	if err := scanApprovalRequest(row, &req); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+			return nil, derrors.WrapErrorf(err, derrors.ErrorCodeCustomNotFound, "Approval request %s not found", id)
 		}
-		return nil, err
+		return nil, derrors.WrapErrorf(err, derrors.ErrorCodeUnknown, "query approval request")
 	}
 	return &req, nil
 }

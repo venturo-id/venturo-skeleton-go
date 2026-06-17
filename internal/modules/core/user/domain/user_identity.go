@@ -12,11 +12,11 @@ const (
 // UserIdentity is a link between a core.users row and a user record on
 // an external identity provider (Google via Firebase, Apple, …).
 type UserIdentity struct {
-	ID             string     `json:"id"`
-	UserID         string     `json:"user_id"`
-	Provider       string     `json:"provider"`
-	ProviderUserID string     `json:"provider_user_id"`
-	Email          *string    `json:"email,omitempty"`
+	ID             string  `json:"id"`
+	UserID         string  `json:"user_id"`
+	Provider       string  `json:"provider"`
+	ProviderUserID string  `json:"provider_user_id"`
+	Email          *string `json:"email,omitempty"`
 	// RawProfile is the JSONB snapshot of provider claims. Carried as
 	// raw bytes so the repository layer can hand it to pgx without
 	// re-parsing.

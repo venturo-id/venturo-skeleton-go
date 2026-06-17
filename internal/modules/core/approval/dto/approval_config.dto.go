@@ -22,7 +22,7 @@ type CreateApprovalConfigRequest struct {
 // UpdateApprovalConfigRequest fully replaces the level list on update.
 // Levels are treated as a set — if you omit one it gets deleted.
 type UpdateApprovalConfigRequest struct {
-	IsActive *bool                      `json:"is_active"`
+	IsActive *bool                       `json:"is_active"`
 	Levels   *[]ApprovalConfigLevelInput `json:"levels,omitempty" binding:"omitempty,dive"`
 }
 

@@ -141,7 +141,7 @@ func RequirePermission(permission string) gin.HandlerFunc {
 				logger.String("permission", permission),
 				logger.Err(err),
 			)
-			response.Error(c, http.StatusInternalServerError, "Permission lookup failed", err.Error())
+			response.Error(c, http.StatusInternalServerError, "Permission lookup failed", "")
 			c.Abort()
 			return
 		}
@@ -203,7 +203,7 @@ func RequireAnyPermission(permissions ...string) gin.HandlerFunc {
 				logger.String("user_id", claims.UserID),
 				logger.Err(err),
 			)
-			response.Error(c, http.StatusInternalServerError, "Permission lookup failed", err.Error())
+			response.Error(c, http.StatusInternalServerError, "Permission lookup failed", "")
 			c.Abort()
 			return
 		}
@@ -265,7 +265,7 @@ func RequireAllPermissions(permissions ...string) gin.HandlerFunc {
 				logger.String("user_id", claims.UserID),
 				logger.Err(err),
 			)
-			response.Error(c, http.StatusInternalServerError, "Permission lookup failed", err.Error())
+			response.Error(c, http.StatusInternalServerError, "Permission lookup failed", "")
 			c.Abort()
 			return
 		}

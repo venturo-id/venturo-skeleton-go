@@ -48,20 +48,20 @@ type ChangePasswordRequest struct {
 
 // UserResponse represents user data in response
 type UserResponse struct {
-	ID              string             `json:"id"`
-	Email           string             `json:"email"`
-	Username        string             `json:"username"`
-	FullName        *string            `json:"full_name,omitempty"`
-	Phone           *string            `json:"phone,omitempty"`
-	AvatarURL       *string            `json:"avatar_url,omitempty"`
-	IsActive        bool               `json:"is_active"`
-	IsEmailVerified bool               `json:"is_email_verified"`
-	RoleName        *string            `json:"role_name,omitempty"`
-	Companies       []UserCompanyItem  `json:"companies,omitempty"`
-	Branches        []UserBranchItem   `json:"branches,omitempty"`
-	LastLoginAt     *time.Time         `json:"last_login_at,omitempty"`
-	CreatedAt       time.Time          `json:"created_at"`
-	UpdatedAt       time.Time          `json:"updated_at"`
+	ID              string            `json:"id"`
+	Email           string            `json:"email"`
+	Username        string            `json:"username"`
+	FullName        *string           `json:"full_name,omitempty"`
+	Phone           *string           `json:"phone,omitempty"`
+	AvatarURL       *string           `json:"avatar_url,omitempty"`
+	IsActive        bool              `json:"is_active"`
+	IsEmailVerified bool              `json:"is_email_verified"`
+	RoleName        *string           `json:"role_name,omitempty"`
+	Companies       []UserCompanyItem `json:"companies,omitempty"`
+	Branches        []UserBranchItem  `json:"branches,omitempty"`
+	LastLoginAt     *time.Time        `json:"last_login_at,omitempty"`
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
 }
 
 // UserCompanyItem represents a company in the user's membership list

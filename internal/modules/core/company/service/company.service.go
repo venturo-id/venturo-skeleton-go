@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"venturo-skeleton-go/internal/modules/core/company/domain"
 	"venturo-skeleton-go/internal/modules/core/company/dto"
 	"venturo-skeleton-go/internal/modules/core/company/repository"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
@@ -32,16 +32,16 @@ type ClientLookup interface {
 }
 
 var (
-	ErrCompanyNotFound    = errors.New("company not found")
-	ErrParentNotFound     = errors.New("parent company not found")
-	ErrUserAlreadyMember  = errors.New("user is already a member")
-	ErrMembershipNotFound = errors.New("membership not found")
-	ErrCannotRemoveOwner  = errors.New("cannot remove company owner")
-	ErrNotAuthorized      = errors.New("not authorized")
-	ErrOwnerTransferOnly  = errors.New("only super_admin can transfer ownership")
-	ErrOwnerAssignOnly        = errors.New("only super_admin can assign a different owner")
-	ErrCannotDeactivateOwner  = errors.New("cannot deactivate company owner")
-	ErrClientUnresolved        = errors.New("could not resolve client for new company")
+	ErrCompanyNotFound       = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Company not found")
+	ErrParentNotFound        = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Parent company not found")
+	ErrUserAlreadyMember     = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "User is already a member")
+	ErrMembershipNotFound    = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Membership not found")
+	ErrCannotRemoveOwner     = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Cannot remove company owner")
+	ErrNotAuthorized         = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Not authorized")
+	ErrOwnerTransferOnly     = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Only super_admin can transfer ownership")
+	ErrOwnerAssignOnly       = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Only super_admin can assign a different owner")
+	ErrCannotDeactivateOwner = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Cannot deactivate company owner")
+	ErrClientUnresolved      = derrors.NewErrorf(derrors.ErrorCodeUnknown, "could not resolve client for new company")
 )
 
 type CompanyService struct {

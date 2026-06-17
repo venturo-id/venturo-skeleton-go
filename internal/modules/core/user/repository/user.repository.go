@@ -13,6 +13,7 @@ import (
 
 	"venturo-skeleton-go/internal/modules/core/user/domain"
 	"venturo-skeleton-go/internal/modules/core/user/dto"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
@@ -129,10 +130,10 @@ func (r *UserRepository) FindByID(ctx context.Context, id string) (*domain.User,
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+			return nil, derrors.WrapErrorf(err, derrors.ErrorCodeCustomNotFound, "User %s not found", id)
 		}
 		logger.Error("Failed to find user by ID", logger.Err(err))
-		return nil, err
+		return nil, derrors.WrapErrorf(err, derrors.ErrorCodeUnknown, "query user")
 	}
 
 	return &user, nil

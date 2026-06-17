@@ -11,12 +11,12 @@ import (
 )
 
 type BranchModule struct {
-	Handler               *handler.BranchHandler
-	Service               *service.BranchService
-	Repository            *repository.BranchRepository
-	UserBranchRepository  *repository.UserBranchRepository
-	UserBranchService     *service.UserBranchService
-	UserBranchHandler     *handler.UserBranchHandler
+	Handler              *handler.BranchHandler
+	Service              *service.BranchService
+	Repository           *repository.BranchRepository
+	UserBranchRepository *repository.UserBranchRepository
+	UserBranchService    *service.UserBranchService
+	UserBranchHandler    *handler.UserBranchHandler
 }
 
 // Initialize initializes the branch module with all dependencies

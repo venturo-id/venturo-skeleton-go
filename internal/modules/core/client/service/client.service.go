@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"regexp"
 	"strings"
 
@@ -16,14 +15,15 @@ import (
 	"venturo-skeleton-go/internal/modules/core/client/domain"
 	"venturo-skeleton-go/internal/modules/core/client/dto"
 	"venturo-skeleton-go/internal/modules/core/client/repository"
+	"venturo-skeleton-go/pkg/derrors"
 )
 
 // Service errors surfaced to handlers / auth.
 var (
-	ErrNotFound       = errors.New("client not found")
-	ErrInvalidSlug    = errors.New("slug must be 3–63 chars, lowercase alphanumerics and hyphens, starting/ending with alphanumeric")
-	ErrSlugTaken      = errors.New("slug is already taken")
-	ErrOwnerResolvUnk = errors.New("could not resolve client for user")
+	ErrNotFound       = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Client not found")
+	ErrInvalidSlug    = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "slug must be 3–63 chars, lowercase alphanumerics and hyphens, starting/ending with alphanumeric")
+	ErrSlugTaken      = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "Slug is already taken")
+	ErrOwnerResolvUnk = derrors.NewErrorf(derrors.ErrorCodeUnknown, "could not resolve client for user")
 )
 
 // slugPattern mirrors the CHECK constraint in migration 012.
@@ -114,7 +114,7 @@ func (s *Service) allocateSlug(ctx context.Context, q repository.Execer, usernam
 		}
 		candidate = base + suffix
 	}
-	return "", fmt.Errorf("could not allocate unique slug after retries")
+	return "", derrors.NewErrorf(derrors.ErrorCodeUnknown, "could not allocate unique slug after retries")
 }
 
 // poolExecerFromRepo is a thin Execer adapter that forwards calls to

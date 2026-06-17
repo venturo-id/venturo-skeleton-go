@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -11,15 +10,16 @@ import (
 
 	"venturo-skeleton-go/internal/modules/core/branch/domain"
 	"venturo-skeleton-go/internal/modules/core/branch/repository"
+	"venturo-skeleton-go/pkg/derrors"
 )
 
 var (
 	// ErrInvalidBranchIDs is returned when one or more submitted branch IDs do
 	// not exist (or were soft-deleted).
-	ErrInvalidBranchIDs = errors.New("invalid branch_ids")
+	ErrInvalidBranchIDs = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "invalid branch_ids")
 	// ErrBranchNotInScope is returned when a submitted branch belongs to a
 	// company the caller is not allowed to assign under (non-super-admin).
-	ErrBranchNotInScope = errors.New("branch not in caller's company scope")
+	ErrBranchNotInScope = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "branch not in caller's company scope")
 )
 
 // CompanyScopeResolver resolves which company IDs a tenant scope is allowed

@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,15 +9,16 @@ import (
 	"venturo-skeleton-go/internal/modules/core/role/domain"
 	"venturo-skeleton-go/internal/modules/core/role/dto"
 	"venturo-skeleton-go/internal/modules/core/role/repository"
+	"venturo-skeleton-go/pkg/derrors"
 	"venturo-skeleton-go/pkg/logger"
 )
 
 var (
-	ErrRoleNotFound       = errors.New("role not found")
-	ErrCodeAlreadyExists  = errors.New("role code already exists")
-	ErrCannotModifySystem = errors.New("cannot modify system role")
-	ErrCannotDeleteSystem = errors.New("cannot delete system role")
-	ErrInvalidPermissions = errors.New("invalid permissions format")
+	ErrRoleNotFound       = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Role not found")
+	ErrCodeAlreadyExists  = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "Role code already exists")
+	ErrCannotModifySystem = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Cannot modify system role")
+	ErrCannotDeleteSystem = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Cannot delete system role")
+	ErrInvalidPermissions = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "Invalid permissions format")
 )
 
 // PermissionCacheInvalidator is the narrow hook the role service needs

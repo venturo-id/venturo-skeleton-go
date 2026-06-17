@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -23,14 +22,14 @@ func NewApprovalConfigHandler(svc *service.ApprovalConfigService) *ApprovalConfi
 func (h *ApprovalConfigHandler) GetAll(c *gin.Context) {
 	var params dto.ApprovalConfigQueryParams
 	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid query parameters", "")
 		return
 	}
 
 	companyID := middleware.GetCompanyID(c)
 	result, err := h.svc.GetAll(c.Request.Context(), companyID, &params)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to list approval configs", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 	response.Success(c, http.StatusOK, "Approval configs retrieved successfully", result)
@@ -46,11 +45,7 @@ func (h *ApprovalConfigHandler) GetByID(c *gin.Context) {
 	companyID := middleware.GetCompanyID(c)
 	result, err := h.svc.GetByID(c.Request.Context(), id, companyID)
 	if err != nil {
-		if errors.Is(err, service.ErrConfigNotFound) {
-			response.Error(c, http.StatusNotFound, "Approval config not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get approval config", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 	response.Success(c, http.StatusOK, "Approval config retrieved successfully", result)
@@ -59,7 +54,7 @@ func (h *ApprovalConfigHandler) GetByID(c *gin.Context) {
 func (h *ApprovalConfigHandler) Create(c *gin.Context) {
 	var req dto.CreateApprovalConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -68,14 +63,7 @@ func (h *ApprovalConfigHandler) Create(c *gin.Context) {
 
 	result, err := h.svc.Create(c.Request.Context(), companyID, &req, createdBy)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrUnknownFeatureKey):
-			response.Error(c, http.StatusBadRequest, "Unknown feature_key", err.Error())
-		case errors.Is(err, service.ErrDuplicateLevel), errors.Is(err, service.ErrLevelNotSequential):
-			response.Error(c, http.StatusBadRequest, "Invalid levels", err.Error())
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to create approval config", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 	response.Success(c, http.StatusCreated, "Approval config created successfully", result)
@@ -90,7 +78,7 @@ func (h *ApprovalConfigHandler) Update(c *gin.Context) {
 
 	var req dto.UpdateApprovalConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -99,14 +87,7 @@ func (h *ApprovalConfigHandler) Update(c *gin.Context) {
 
 	result, err := h.svc.Update(c.Request.Context(), id, companyID, &req, updatedBy)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrConfigNotFound):
-			response.Error(c, http.StatusNotFound, "Approval config not found", "")
-		case errors.Is(err, service.ErrDuplicateLevel), errors.Is(err, service.ErrLevelNotSequential):
-			response.Error(c, http.StatusBadRequest, "Invalid levels", err.Error())
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to update approval config", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 	response.Success(c, http.StatusOK, "Approval config updated successfully", result)
@@ -123,11 +104,7 @@ func (h *ApprovalConfigHandler) Delete(c *gin.Context) {
 	deletedBy := middleware.MustGetUserID(c)
 
 	if err := h.svc.Delete(c.Request.Context(), id, companyID, deletedBy); err != nil {
-		if errors.Is(err, service.ErrConfigNotFound) {
-			response.Error(c, http.StatusNotFound, "Approval config not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to delete approval config", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 	response.Success(c, http.StatusOK, "Approval config deleted successfully", nil)

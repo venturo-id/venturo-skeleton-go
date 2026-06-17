@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"net/http"
 	"strings"
 
@@ -25,7 +24,7 @@ func NewBranchHandler(branchService *service.BranchService) *BranchHandler {
 func (h *BranchHandler) GetAll(c *gin.Context) {
 	var params dto.BranchQueryParams
 	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid query parameters", "")
 		return
 	}
 
@@ -35,7 +34,7 @@ func (h *BranchHandler) GetAll(c *gin.Context) {
 
 	result, err := h.branchService.GetAll(ctx, companyID, &params)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get branches", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -46,7 +45,7 @@ func (h *BranchHandler) GetAll(c *gin.Context) {
 func (h *BranchHandler) GetAllByCompanies(c *gin.Context) {
 	var params dto.BranchQueryParams
 	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid query parameters", "")
 		return
 	}
 
@@ -82,7 +81,7 @@ func (h *BranchHandler) GetAllByCompanies(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.branchService.GetAllByCompanies(ctx, claims.UserID, isSuperAdmin, &params)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get branches", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -100,11 +99,7 @@ func (h *BranchHandler) GetByID(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.branchService.GetByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, service.ErrBranchNotFound) {
-			response.Error(c, http.StatusNotFound, "Branch not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get branch", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -121,7 +116,7 @@ func (h *BranchHandler) GetByID(c *gin.Context) {
 func (h *BranchHandler) Create(c *gin.Context) {
 	var req dto.CreateBranchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -131,11 +126,7 @@ func (h *BranchHandler) Create(c *gin.Context) {
 
 	result, err := h.branchService.Create(ctx, companyID, &req, createdBy)
 	if err != nil {
-		if errors.Is(err, service.ErrBranchCodeTaken) {
-			response.Error(c, http.StatusConflict, "Branch code already exists", err.Error())
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to create branch", err.Error())
+		response.RenderError(c, err)
 		return
 	}
 
@@ -157,7 +148,7 @@ func (h *BranchHandler) Update(c *gin.Context) {
 
 	var req dto.UpdateBranchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+		response.Error(c, http.StatusBadRequest, "Invalid request payload", "")
 		return
 	}
 
@@ -166,14 +157,7 @@ func (h *BranchHandler) Update(c *gin.Context) {
 
 	result, err := h.branchService.Update(ctx, id, &req, updatedBy)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrBranchNotFound):
-			response.Error(c, http.StatusNotFound, "Branch not found", "")
-		case errors.Is(err, service.ErrBranchCodeTaken):
-			response.Error(c, http.StatusConflict, "Branch code already exists", err.Error())
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to update branch", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 
@@ -197,14 +181,7 @@ func (h *BranchHandler) Delete(c *gin.Context) {
 
 	err := h.branchService.Delete(ctx, id, deletedBy)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrBranchNotFound):
-			response.Error(c, http.StatusNotFound, "Branch not found", "")
-		case errors.Is(err, service.ErrCannotDeleteDefault):
-			response.Error(c, http.StatusForbidden, "Cannot delete default branch", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to delete branch", err.Error())
-		}
+		response.RenderError(c, err)
 		return
 	}
 

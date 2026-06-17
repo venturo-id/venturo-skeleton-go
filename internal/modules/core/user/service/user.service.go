@@ -11,28 +11,23 @@ import (
 	branchDomain "venturo-skeleton-go/internal/modules/core/branch/domain"
 	companyDomain "venturo-skeleton-go/internal/modules/core/company/domain"
 	companyDto "venturo-skeleton-go/internal/modules/core/company/dto"
-	companyService "venturo-skeleton-go/internal/modules/core/company/service"
 	roleDomain "venturo-skeleton-go/internal/modules/core/role/domain"
 	"venturo-skeleton-go/internal/modules/core/user/domain"
 	"venturo-skeleton-go/internal/modules/core/user/dto"
 	"venturo-skeleton-go/internal/modules/core/user/repository"
 	"venturo-skeleton-go/pkg/crypto"
+	"venturo-skeleton-go/pkg/derrors"
 	jwtpkg "venturo-skeleton-go/pkg/jwt"
 	"venturo-skeleton-go/pkg/logger"
 )
 
 var (
-	ErrUserNotFound          = errors.New("user not found")
-	ErrEmailAlreadyExists    = errors.New("email already exists")
-	ErrUsernameAlreadyExists = errors.New("username already exists")
-	ErrInvalidPassword       = errors.New("invalid password")
-	ErrRoleNotAllowed        = errors.New("role is not allowed for caller")
-	ErrCompaniesRequired     = errors.New("user must be assigned to at least one company")
-
-	// ErrCompanyNotFound is re-exported so handlers can map the error
-	// returned by AssignUserToCompaniesTx / SyncUserCompanies without
-	// importing the company service package directly.
-	ErrCompanyNotFound = companyService.ErrCompanyNotFound
+	ErrUserNotFound          = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "user not found")
+	ErrEmailAlreadyExists    = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "Email already exists")
+	ErrUsernameAlreadyExists = derrors.NewErrorf(derrors.ErrorCodeCustomAlreadyExists, "Username already exists")
+	ErrInvalidPassword       = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "invalid password")
+	ErrRoleNotAllowed        = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "Role is not allowed for caller")
+	ErrCompaniesRequired     = derrors.NewErrorf(derrors.ErrorCodeCustomBadRequest, "User must be assigned to at least one company")
 )
 
 // TenantScope limits user visibility for non-super-admin callers. Pass nil to
@@ -108,8 +103,12 @@ func (s *UserService) validateRoleForScope(ctx context.Context, roleID *string, 
 		// non-super-admin caller to pin an unverified role onto a user.
 		return ErrRoleNotAllowed
 	}
+	// A missing role is a validation failure here (fail-closed 403), not a
+	// surfaced NotFound. FindByID now wraps absence as NotFound (unwraps to
+	// pgx.ErrNoRows) — treat that as "no such role" and fall through to
+	// ErrRoleNotAllowed; only propagate genuine query failures.
 	role, err := s.roleLookup.FindByID(ctx, *roleID)
-	if err != nil {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	if role == nil {
@@ -276,7 +275,7 @@ func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest, cr
 	// commit or roll back together.
 	if len(req.CompanyIDs) > 0 {
 		if s.companySyncer == nil {
-			return nil, errors.New("company syncer not configured")
+			return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "company syncer not configured")
 		}
 		syncReq := &companyDto.SyncUserCompaniesRequest{
 			CompanyIDs: req.CompanyIDs,
@@ -292,7 +291,7 @@ func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest, cr
 	// caller's scope company — any violation rolls the user row back.
 	if len(req.BranchIDs) > 0 {
 		if s.branchSyncer == nil {
-			return nil, errors.New("branch syncer not configured")
+			return nil, derrors.NewErrorf(derrors.ErrorCodeUnknown, "branch syncer not configured")
 		}
 		var scopeCompanyID *string
 		if scope != nil {
