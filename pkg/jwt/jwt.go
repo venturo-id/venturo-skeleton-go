@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 var (
@@ -77,6 +78,25 @@ func GetExpirationTime() time.Duration {
 	return duration
 }
 
+// GetRefreshExpirationTime returns the refresh-token lifetime from the
+// environment. Mirrors GetExpirationTime: reads JWT_REFRESH_EXPIRATION,
+// defaults to 168h (7 days), and falls back to the same default on a
+// parse error. Lets operators tune session length per environment
+// without recompiling.
+func GetRefreshExpirationTime() time.Duration {
+	expStr := os.Getenv("JWT_REFRESH_EXPIRATION")
+	if expStr == "" {
+		return 168 * time.Hour // Default 7 days
+	}
+
+	duration, err := time.ParseDuration(expStr)
+	if err != nil {
+		return 168 * time.Hour // Fallback to 7 days
+	}
+
+	return duration
+}
+
 // GenerateToken generates a new JWT token with user claims.
 // clientID / clientSlug are the registration-level tenant identifiers —
 // callers pass them in so the FE can read its current client from the
@@ -109,6 +129,14 @@ func GenerateToken(
 		IsSuperAdmin: isSuperAdmin,
 		Roles:        roles,
 		RegisteredClaims: jwt.RegisteredClaims{
+			// ID is the per-token jti — a unique UUID minted for every
+			// access token. It lets Logout add this exact token to the
+			// Redis denylist (see internal/shared/tokendenylist) so a
+			// stolen/cached token stops working immediately on logout
+			// instead of lingering until natural expiry. IssuedAt (iat)
+			// is the cutoff anchor used by LogoutAll to reject every
+			// token minted before the "logout everywhere" moment.
+			ID:        uuid.NewString(),
 			ExpiresAt: jwt.NewNumericDate(now.Add(expirationTime)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),

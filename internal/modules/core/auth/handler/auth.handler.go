@@ -137,8 +137,14 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		return
 	}
 
+	// Claims are present for JWT-authenticated logouts (the common case)
+	// and carry the jti used to denylist this access token. For an
+	// API-key logout there's no JWT jti — claims may be nil, and the
+	// service degrades to refresh-token-only revocation.
+	claims, _ := middleware.GetUserFromContext(c)
+
 	ctx := c.Request.Context()
-	err := h.authService.Logout(ctx, req.RefreshToken)
+	err := h.authService.Logout(ctx, req.RefreshToken, claims)
 	if err != nil {
 		response.RenderError(c, err)
 		return
@@ -158,6 +164,41 @@ func (h *AuthHandler) LogoutAll(c *gin.Context) {
 	}
 
 	response.Success(c, http.StatusOK, "Logged out from all devices successfully", nil)
+}
+
+// ListSessions handles GET /core/v1/auth/sessions — the caller's active
+// sessions. The FE may pass its current refresh token as the optional
+// `current_refresh_token` query param so the matching session is flagged
+// is_current; it's never required and never logged.
+func (h *AuthHandler) ListSessions(c *gin.Context) {
+	userID := middleware.MustGetUserID(c)
+	currentRefreshToken := c.Query("current_refresh_token")
+
+	ctx := c.Request.Context()
+	sessions, err := h.authService.ListSessions(ctx, userID, currentRefreshToken)
+	if err != nil {
+		response.RenderError(c, err)
+		return
+	}
+
+	response.Success(c, http.StatusOK, "Sessions retrieved successfully", sessions)
+}
+
+// RevokeSession handles DELETE /core/v1/auth/sessions/:id — revoke one of
+// the caller's own sessions. A non-owned or unknown id returns 404 (the
+// service enforces ownership in the query) so ids can't be enumerated.
+func (h *AuthHandler) RevokeSession(c *gin.Context) {
+	userID := middleware.MustGetUserID(c)
+	sessionID := c.Param("id")
+
+	ctx := c.Request.Context()
+	err := h.authService.RevokeSession(ctx, userID, sessionID)
+	if err != nil {
+		response.RenderError(c, err)
+		return
+	}
+
+	response.Success(c, http.StatusOK, "Session revoked successfully", nil)
 }
 
 func (h *AuthHandler) SwitchCompany(c *gin.Context) {

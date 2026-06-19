@@ -24,6 +24,7 @@ import (
 	"venturo-skeleton-go/internal/shared/rabbitmq"
 	sharedRedis "venturo-skeleton-go/internal/shared/redis"
 	"venturo-skeleton-go/internal/shared/response"
+	"venturo-skeleton-go/internal/shared/tokendenylist"
 
 	"venturo-skeleton-go/pkg/cache"
 	pkgfirebase "venturo-skeleton-go/pkg/firebase"
@@ -67,6 +68,14 @@ func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 		zap.Int("db", cfg.Redis.DB),
 		zap.Duration("permission_ttl", cfg.Redis.PermissionTTL),
 	)
+
+	// ─── Access-token denylist (revocation) ─────────────────────────
+	// Makes JWT access tokens revocable on logout / logout-all. Shares
+	// the Redis client above. Wired into the JWTAuth middleware (reads)
+	// and the auth service (writes, below). Fail-open by design — a
+	// Redis outage degrades to "no revocation", never an auth lockout.
+	tokenDenylistService := tokendenylist.NewService(redisClient)
+	middleware.SetTokenDenylist(tokenDenylistService)
 
 	// ─── Cache (reuses the Redis client above) ──────────────────────
 	// The typed cache shares the existing Redis connection — it never opens
@@ -218,6 +227,11 @@ func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 		middleware.SetAuthzService(authzService)
 		roleModule.Service.SetPermissionCacheInvalidator(authzService)
 		authModule.Service.SetPermissionReader(authzService)
+
+		// Wire the access-token denylist write side so Logout /
+		// LogoutAll can revoke the access token, not just the refresh
+		// token (read side wired into the middleware above).
+		authModule.Service.SetTokenDenylist(tokenDenylistService)
 
 		// Initialize and setup company module
 		companyModule := company.Initialize(db)
