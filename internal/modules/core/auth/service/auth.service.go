@@ -40,6 +40,7 @@ var (
 	ErrRefreshTokenRevoked   = derrors.NewErrorf(derrors.ErrorCodeUnauthorized, "refresh token revoked")
 	ErrCompanyNotFound       = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Company not found")
 	ErrNotCompanyMember      = derrors.NewErrorf(derrors.ErrorCodeCustomForbidden, "User is not a member of this company")
+	ErrSessionNotFound       = derrors.NewErrorf(derrors.ErrorCodeCustomNotFound, "Session not found")
 
 	// Google sign-in errors
 	ErrFirebaseNotConfigured = derrors.NewErrorf(derrors.ErrorCodeServiceUnavailable, "google sign-in not configured")
@@ -55,9 +56,22 @@ const firebaseSignInProviderGoogle = "google.com"
 const (
 	MaxFailedLoginAttempts = 5
 	LockDuration           = 15 * time.Minute
-	RefreshTokenExpiry     = 7 * 24 * time.Hour // 7 days
-	AccessTokenExpiryHours = 24
 )
+
+// refreshTokenExpiry returns the refresh-token lifetime, driven by
+// JWT_REFRESH_EXPIRATION (default 168h). Read per-issue rather than
+// cached so an env change takes effect on the next token minted.
+func refreshTokenExpiry() time.Duration {
+	return jwt.GetRefreshExpirationTime()
+}
+
+// accessTokenExpiresInSeconds returns the access-token TTL in seconds,
+// sourced from the same place the token's exp is set (jwt.GetExpirationTime,
+// driven by JWT_EXPIRATION). Used for the `expires_in` response field so
+// it never drifts from the actual token lifetime.
+func accessTokenExpiresInSeconds() int {
+	return int(jwt.GetExpirationTime().Seconds())
+}
 
 // CompanyUserRepository interface for company user operations
 type CompanyUserRepository interface {
@@ -102,6 +116,17 @@ type PermissionReader interface {
 	GetPermissions(ctx context.Context, userID, companyID string) ([]string, error)
 }
 
+// TokenDenylister is the seam the logout flow uses to revoke access
+// tokens. Implemented by *tokendenylist.Service — kept as an interface
+// so auth doesn't import the shared package directly and tests can fake
+// it. Optional: when nil (e.g. tests, or a deploy without the denylist
+// wired) logout still revokes the refresh token, just not the access
+// token — same behaviour as before this seam existed.
+type TokenDenylister interface {
+	DenyJTI(ctx context.Context, jti string, ttl time.Duration) error
+	DenyUserBefore(ctx context.Context, userID string, cutoff time.Time, ttl time.Duration) error
+}
+
 // FirebaseVerifier is the seam the auth service uses to verify Firebase
 // ID tokens. Concrete impl: *pkg/firebase.Client. Kept as an interface
 // so tests can fake it without spinning up Firebase, and so the
@@ -122,6 +147,7 @@ type AuthService struct {
 	branchRepo       BranchRepository
 	clientService    ClientService
 	permissionReader PermissionReader
+	tokenDenylist    TokenDenylister
 	firebase         FirebaseVerifier
 	config           *config.Config
 }
@@ -176,6 +202,13 @@ func (s *AuthService) SetBranchRepo(repo BranchRepository) {
 // correct, but bypasses Redis.
 func (s *AuthService) SetPermissionReader(r PermissionReader) {
 	s.permissionReader = r
+}
+
+// SetTokenDenylist wires the Redis-backed access-token denylist used by
+// Logout / LogoutAll to revoke access tokens (not just refresh tokens).
+// Optional — without it, logout only revokes the refresh token.
+func (s *AuthService) SetTokenDenylist(d TokenDenylister) {
+	s.tokenDenylist = d
 }
 
 // resolveClientInfo looks up a client by id and returns its
@@ -476,7 +509,7 @@ func (s *AuthService) SignIn(ctx context.Context, req *dto.SignInRequest, device
 		TokenHash:  hashToken(refreshTokenStr),
 		DeviceInfo: deviceInfo,
 		IPAddress:  &ipAddress,
-		ExpiresAt:  time.Now().Add(RefreshTokenExpiry),
+		ExpiresAt:  time.Now().Add(refreshTokenExpiry()),
 		CreatedAt:  time.Now(),
 	}
 
@@ -495,7 +528,7 @@ func (s *AuthService) SignIn(ctx context.Context, req *dto.SignInRequest, device
 		AccessToken:  accessToken,
 		RefreshToken: refreshTokenStr,
 		TokenType:    "Bearer",
-		ExpiresIn:    AccessTokenExpiryHours * 3600,
+		ExpiresIn:    accessTokenExpiresInSeconds(),
 		User: dto.UserInfo{
 			ID:       user.ID,
 			Email:    user.Email,
@@ -544,21 +577,49 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshTokenStr string) 
 	// Update last used
 	_ = s.refreshTokenRepo.UpdateLastUsed(ctx, refreshToken.ID)
 
-	// Get user roles. Permissions are not needed here — the refresh
-	// response returns only the new token pair, and permissions are
-	// looked up from Redis on subsequent requests via authz.
-	var roles []string
-	if s.roleRepo != nil {
-		roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID, nil)
+	// Re-derive the user's primary company so the new access token carries
+	// company context (company_id, name, client). Without this the refreshed
+	// token has an empty company_id and every CompanyContext-guarded endpoint
+	// rejects it with "Company context required". Mirrors SignIn's lookup.
+	// Note: a refresh always resolves back to the *primary* company — if the
+	// user had switched to a non-primary company, that selection is not
+	// preserved across refresh (they must switch-company again).
+	var companyID, companyName string
+	var clientID, clientSlug string
+	if s.companyUserRepo != nil {
+		primaryMembership, _ := s.companyUserRepo.GetPrimaryCompany(ctx, user.ID)
+		if primaryMembership != nil {
+			companyID = primaryMembership.CompanyID
+			if s.companyRepo != nil {
+				company, _ := s.companyRepo.FindByID(ctx, companyID)
+				if company != nil {
+					companyName = company.Name
+					clientID, clientSlug, _ = s.resolveClientInfo(ctx, company.ClientID)
+				}
+			}
+		}
 	}
 
-	// Generate new access token
+	// Get user roles, scoped to the primary company when available.
+	// Permissions are not needed here — the refresh response returns only
+	// the new token pair, and permissions are looked up from Redis on
+	// subsequent requests via authz.
+	var roles []string
+	if s.roleRepo != nil {
+		if companyID != "" {
+			roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID, &companyID)
+		} else {
+			roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID, nil)
+		}
+	}
+
+	// Generate new access token with company context
 	fullName := ""
 	if user.FullName != nil {
 		fullName = *user.FullName
 	}
 	isSuperAdmin := containsRole(roles, jwt.RoleSuperAdmin)
-	accessToken, err := jwt.GenerateToken(user.ID, "", "", "", "", user.Email, user.Username, fullName, isSuperAdmin, roles)
+	accessToken, err := jwt.GenerateToken(user.ID, companyID, companyName, clientID, clientSlug, user.Email, user.Username, fullName, isSuperAdmin, roles)
 	if err != nil {
 		logger.Error("Failed to generate access token", logger.Err(err))
 		return nil, err
@@ -581,7 +642,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshTokenStr string) 
 		TokenHash:  hashToken(newRefreshTokenStr),
 		DeviceInfo: refreshToken.DeviceInfo,
 		IPAddress:  refreshToken.IPAddress,
-		ExpiresAt:  time.Now().Add(RefreshTokenExpiry),
+		ExpiresAt:  time.Now().Add(refreshTokenExpiry()),
 		CreatedAt:  time.Now(),
 	}
 
@@ -595,12 +656,16 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshTokenStr string) 
 		AccessToken:  accessToken,
 		RefreshToken: newRefreshTokenStr,
 		TokenType:    "Bearer",
-		ExpiresIn:    AccessTokenExpiryHours * 3600,
+		ExpiresIn:    accessTokenExpiresInSeconds(),
 	}, nil
 }
 
-// Logout revokes a refresh token
-func (s *AuthService) Logout(ctx context.Context, refreshTokenStr string) error {
+// Logout revokes the caller's refresh token and, when the access-token
+// claims are supplied, denylists that access token's jti so it stops
+// working immediately (not just at natural expiry). The claims come from
+// the JWTAuth middleware via the handler; they're optional so an
+// API-key-authenticated logout (no jti) still revokes the refresh token.
+func (s *AuthService) Logout(ctx context.Context, refreshTokenStr string, accessClaims *jwt.Claims) error {
 	tokenHash := hashToken(refreshTokenStr)
 
 	err := s.refreshTokenRepo.RevokeByTokenHash(ctx, tokenHash)
@@ -609,10 +674,25 @@ func (s *AuthService) Logout(ctx context.Context, refreshTokenStr string) error 
 		return err
 	}
 
+	// Best-effort access-token revocation. A denylist failure must not
+	// fail the logout — the refresh token is already revoked, which is
+	// the durable part; the worst case is the access token survives until
+	// its short natural expiry. Log and move on.
+	if s.tokenDenylist != nil && accessClaims != nil {
+		if jti, ttl, ok := accessTokenDenyParams(accessClaims); ok {
+			if dErr := s.tokenDenylist.DenyJTI(ctx, jti, ttl); dErr != nil {
+				logger.Warn("Logout: failed to denylist access token", logger.Err(dErr))
+			}
+		}
+	}
+
 	return nil
 }
 
-// LogoutAll revokes all refresh tokens for a user
+// LogoutAll revokes all of a user's refresh tokens and stamps a denylist
+// cutoff = now, so every access token issued before this moment is
+// rejected on its next request. The cutoff TTL is the access-token
+// lifetime, so it outlives any token it must reject and then self-expires.
 func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
 	err := s.refreshTokenRepo.RevokeAllByUserID(ctx, userID)
 	if err != nil {
@@ -620,7 +700,79 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
 		return err
 	}
 
+	if s.tokenDenylist != nil {
+		cutoff := time.Now()
+		if dErr := s.tokenDenylist.DenyUserBefore(ctx, userID, cutoff, jwt.GetExpirationTime()); dErr != nil {
+			logger.Warn("LogoutAll: failed to stamp access-token cutoff", logger.Err(dErr))
+		}
+	}
+
 	return nil
+}
+
+// ListSessions returns the caller's active (non-revoked) sessions for
+// the "my devices" view. token_hash is never included — the response DTO
+// exposes only recognisable metadata. The session matching the refresh
+// token presented on this request (if any) is flagged is_current so the
+// FE can label it. currentRefreshToken may be "" (e.g. the FE didn't
+// send it); then no row is marked current.
+func (s *AuthService) ListSessions(ctx context.Context, userID, currentRefreshToken string) ([]dto.SessionResponse, error) {
+	tokens, err := s.refreshTokenRepo.FindByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	var currentHash string
+	if currentRefreshToken != "" {
+		currentHash = hashToken(currentRefreshToken)
+	}
+
+	sessions := make([]dto.SessionResponse, 0, len(tokens))
+	for i := range tokens {
+		t := tokens[i]
+		sessions = append(sessions, dto.SessionResponse{
+			ID:         t.ID,
+			DeviceInfo: t.DeviceInfo,
+			IPAddress:  t.IPAddress,
+			LastUsedAt: t.LastUsedAt,
+			CreatedAt:  t.CreatedAt,
+			IsCurrent:  currentHash != "" && t.TokenHash == currentHash,
+		})
+	}
+
+	return sessions, nil
+}
+
+// RevokeSession revokes one of the caller's own sessions by id. Ownership
+// is enforced in the repository's WHERE clause (id + user_id), so a
+// caller can't revoke another user's session — a mismatch is reported as
+// 404 (not 403) so session ids can't be enumerated. Revoking only stops
+// future refreshes; pair with the access-token denylist for immediate
+// access-token death.
+func (s *AuthService) RevokeSession(ctx context.Context, userID, sessionID string) error {
+	revoked, err := s.refreshTokenRepo.RevokeByIDAndUser(ctx, sessionID, userID)
+	if err != nil {
+		return err
+	}
+	if !revoked {
+		return ErrSessionNotFound
+	}
+	return nil
+}
+
+// accessTokenDenyParams pulls the jti and remaining lifetime from access
+// claims for denylisting. Returns ok=false when there's no jti (e.g. an
+// API-key request, or a legacy token minted before jti existed) or the
+// token has already expired (nothing to deny).
+func accessTokenDenyParams(claims *jwt.Claims) (jti string, ttl time.Duration, ok bool) {
+	if claims == nil || claims.ID == "" || claims.ExpiresAt == nil {
+		return "", 0, false
+	}
+	ttl = time.Until(claims.ExpiresAt.Time)
+	if ttl <= 0 {
+		return "", 0, false
+	}
+	return claims.ID, ttl, true
 }
 
 // SwitchCompany switches the user's active company context
@@ -694,7 +846,7 @@ func (s *AuthService) SwitchCompany(ctx context.Context, userID, companyID strin
 		ID:        uuid.New().String(),
 		UserID:    user.ID,
 		TokenHash: hashToken(refreshTokenStr),
-		ExpiresAt: time.Now().Add(RefreshTokenExpiry),
+		ExpiresAt: time.Now().Add(refreshTokenExpiry()),
 		CreatedAt: time.Now(),
 	}
 
@@ -708,7 +860,7 @@ func (s *AuthService) SwitchCompany(ctx context.Context, userID, companyID strin
 		AccessToken:  accessToken,
 		RefreshToken: refreshTokenStr,
 		TokenType:    "Bearer",
-		ExpiresIn:    AccessTokenExpiryHours * 3600,
+		ExpiresIn:    accessTokenExpiresInSeconds(),
 		Company: dto.CompanyInfo{
 			ID:   companyID,
 			Name: companyName,
@@ -1201,7 +1353,7 @@ func (s *AuthService) issueGoogleTokens(
 		TokenHash:  hashToken(refreshTokenStr),
 		DeviceInfo: deviceInfo,
 		IPAddress:  &ipAddress,
-		ExpiresAt:  time.Now().Add(RefreshTokenExpiry),
+		ExpiresAt:  time.Now().Add(refreshTokenExpiry()),
 		CreatedAt:  time.Now(),
 	}
 	if err := s.refreshTokenRepo.Create(ctx, refreshToken); err != nil {
@@ -1220,7 +1372,7 @@ func (s *AuthService) issueGoogleTokens(
 		AccessToken:  accessToken,
 		RefreshToken: refreshTokenStr,
 		TokenType:    "Bearer",
-		ExpiresIn:    AccessTokenExpiryHours * 3600,
+		ExpiresIn:    accessTokenExpiresInSeconds(),
 		IsNewUser:    isNewUser,
 		User: dto.UserInfo{
 			ID:       user.ID,

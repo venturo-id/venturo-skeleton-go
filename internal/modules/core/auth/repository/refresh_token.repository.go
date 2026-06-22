@@ -130,6 +130,28 @@ func (r *RefreshTokenRepository) Revoke(ctx context.Context, id string) error {
 	return nil
 }
 
+// RevokeByIDAndUser revokes a single refresh token only if it belongs to
+// userID. The user_id is part of the WHERE clause (not a post-fetch
+// check), so one user can never revoke another's session — the UPDATE
+// simply matches zero rows. Returns whether a row was actually revoked
+// so the caller can answer 404 on a miss (avoids leaking which ids exist)
+// and treat an already-revoked / unknown id the same way.
+func (r *RefreshTokenRepository) RevokeByIDAndUser(ctx context.Context, id, userID string) (bool, error) {
+	query := `
+		UPDATE core.refresh_tokens
+		SET revoked_at = $3
+		WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+	`
+
+	tag, err := r.db.Exec(ctx, query, id, userID, time.Now())
+	if err != nil {
+		logger.Error("Failed to revoke refresh token by id and user", logger.Err(err))
+		return false, err
+	}
+
+	return tag.RowsAffected() > 0, nil
+}
+
 // RevokeByTokenHash revokes a refresh token by its hash
 func (r *RefreshTokenRepository) RevokeByTokenHash(ctx context.Context, tokenHash string) error {
 	query := `UPDATE core.refresh_tokens SET revoked_at = $2 WHERE token_hash = $1`

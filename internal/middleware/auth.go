@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"venturo-skeleton-go/internal/shared/response"
 	jwtpkg "venturo-skeleton-go/pkg/jwt"
@@ -23,6 +24,27 @@ var apiKeyValidator ApiKeyValidator
 // SetApiKeyValidator sets the global API key validator
 func SetApiKeyValidator(v ApiKeyValidator) {
 	apiKeyValidator = v
+}
+
+// TokenDenylistChecker is the read seam JWTAuth uses to enforce
+// access-token revocation. Implemented by *tokendenylist.Service. Both
+// methods are fail-open by contract (return false on a Redis outage), so
+// a cache problem degrades to "no revocation" rather than locking
+// everyone out.
+type TokenDenylistChecker interface {
+	IsJTIDenied(ctx context.Context, jti string) bool
+	IsIssuedBeforeCutoff(ctx context.Context, userID string, iat time.Time) bool
+}
+
+// tokenDenylist is the global denylist checker (set by router). When
+// nil, JWTAuth skips the revocation check entirely — access tokens then
+// behave as before the denylist existed (valid until natural expiry).
+var tokenDenylist TokenDenylistChecker
+
+// SetTokenDenylist registers the access-token denylist checker. Call
+// once during router setup, after Redis is initialised.
+func SetTokenDenylist(d TokenDenylistChecker) {
+	tokenDenylist = d
 }
 
 // JWTAuth is a middleware that validates JWT tokens or API keys
@@ -78,6 +100,29 @@ func JWTAuth() gin.HandlerFunc {
 			response.Error(c, http.StatusUnauthorized, "Unauthorized", message)
 			c.Abort()
 			return
+		}
+
+		// Access-token revocation check (denylist). Runs only for JWT
+		// auth — API keys take the early-return path above and are
+		// revoked through their own lifecycle. Fail-open: the checker
+		// returns false on a Redis outage, so a cache problem can't lock
+		// users out. A token is rejected if its jti was denylisted
+		// (logout) or it was issued before the user's logout-all cutoff.
+		if tokenDenylist != nil {
+			ctx := c.Request.Context()
+			revoked := tokenDenylist.IsJTIDenied(ctx, claims.ID)
+			if !revoked && claims.IssuedAt != nil {
+				revoked = tokenDenylist.IsIssuedBeforeCutoff(ctx, claims.UserID, claims.IssuedAt.Time)
+			}
+			if revoked {
+				logger.Warn("Rejected revoked access token",
+					logger.String("user_id", claims.UserID),
+					logger.String("jti", claims.ID),
+				)
+				response.Error(c, http.StatusUnauthorized, "Unauthorized", "Token has been revoked")
+				c.Abort()
+				return
+			}
 		}
 
 		// Store claims in context for later use

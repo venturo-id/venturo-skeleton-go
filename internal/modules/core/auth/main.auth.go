@@ -46,5 +46,9 @@ func (m *AuthModule) SetupRoutes(router *gin.RouterGroup) {
 		auth.POST("/switch-company", middleware.JWTAuth(), m.Handler.SwitchCompany)
 		auth.GET("/companies", middleware.JWTAuth(), m.Handler.GetMyCompanies)
 		auth.GET("/me", middleware.JWTAuth(), m.Handler.GetMe)
+
+		// Active-session management (Keycloak-style "my devices").
+		auth.GET("/sessions", middleware.JWTAuth(), m.Handler.ListSessions)
+		auth.DELETE("/sessions/:id", middleware.JWTAuth(), m.Handler.RevokeSession)
 	}
 }

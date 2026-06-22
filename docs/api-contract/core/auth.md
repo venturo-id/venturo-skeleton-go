@@ -7,6 +7,23 @@
 
 ---
 
+## 🆕 (2026-06-18) — Access-token revocation + active session management
+
+Dua perubahan keamanan:
+
+1. **Access token sekarang bisa di-revoke saat logout.** Sebelumnya `POST /auth/logout` cuma mencabut refresh token; access token (JWT) tetap valid sampai expiry alami (s/d 24 jam). Sekarang:
+   - JWT membawa claim baru `jti` (token id unik per token).
+   - `POST /auth/logout` mendenylist `jti` access token yang dipakai → token itu langsung **401 "Token has been revoked"** di request berikutnya.
+   - `POST /auth/logout-all` menandai cutoff per-user → **semua** access token yang diterbitkan sebelum panggilan itu langsung ditolak.
+   - Denylist disimpan di Redis dengan TTL = sisa umur token (auto-expire, tidak ada unbounded growth). **Fail-open**: kalau Redis down, check di-skip (token tetap jalan) demi menghindari lockout massal.
+   - **Dampak FE:** tidak ada perubahan request. Cukup tangani `401` setelah logout sebagai "sesi berakhir" (memang itu yang diinginkan). Jangan lagi pakai access token setelah logout.
+
+2. **Endpoint manajemen sesi (Keycloak-style).** Lihat [section 6 & 7](#6-list-active-sessions) — `GET /auth/sessions` untuk lihat device aktif, `DELETE /auth/sessions/:id` untuk cabut satu sesi.
+
+3. **`JWT_REFRESH_EXPIRATION` .** Sebelumnya nilai env ini diabaikan (refresh TTL hardcoded 7 hari). Sekarang refresh-token lifetime dibaca dari env (default tetap `168h`). Tidak ada perubahan FE.
+
+---
+
 ## 🆕 (2026-05-16) — Sign in with Google (Firebase)
 
 Endpoint baru: `POST /core/v1/auth/google` — autentikasi pakai Firebase Google ID token. FE tinggal kirim `id_token` yang didapat dari Firebase Web SDK, BE memverifikasi, lalu salah satu dari:
@@ -98,6 +115,7 @@ Access token berisi **identity claims saja** — permissions tidak ada di sini (
   "client_slug": "tuai",
   "is_super_admin": false,
   "roles": ["administrator"],
+  "jti": "9f1c2e7a-...",
   "exp": 1735689600,
   "iat": 1735603200,
   "nbf": 1735603200,
@@ -120,6 +138,7 @@ Access token berisi **identity claims saja** — permissions tidak ada di sini (
 | `client_slug` | string | DNS-safe client slug — dipakai FE untuk bootstrap translation overrides |
 | `is_super_admin` | bool | `true` = bypass semua permission check di backend |
 | `roles` | string[] | Role codes aktif user (mis. `["administrator"]`) |
+| `jti` | string (UUID) | Token id unik per access token. Dipakai backend untuk denylist saat logout — FE tidak perlu memprosesnya |
 | `exp` | int64 | Expiry (Unix timestamp, default 24 jam) |
 | `iat` | int64 | Issued-at (Unix timestamp) |
 | `nbf` | int64 | Not-before (Unix timestamp) |
@@ -517,7 +536,7 @@ POST /core/v1/auth/refresh
 
 ### 5. Logout (Single Device)
 
-Revoke satu refresh token.
+Revoke refresh token **dan** access token yang sedang dipakai. Access token yang dipakai di header `Authorization` langsung masuk denylist (via `jti`) → tidak bisa dipakai lagi setelah ini.
 
 ```
 POST /core/v1/auth/logout
@@ -540,11 +559,13 @@ POST /core/v1/auth/logout
 }
 ```
 
+> **Sejak 2026-06-18:** access token yang dipakai untuk memanggil endpoint ini langsung di-revoke. Request berikutnya dengan token itu akan dapat `401 "Token has been revoked"`. FE harus buang access token + refresh token dari storage setelah logout.
+
 ---
 
 ### 6. Logout All Devices
 
-Revoke semua refresh token milik user.
+Revoke semua refresh token milik user **dan** semua access token yang diterbitkan sebelum panggilan ini (lewat cutoff per-user).
 
 ```
 POST /core/v1/auth/logout-all
@@ -561,6 +582,80 @@ POST /core/v1/auth/logout-all
   "message": "Logged out from all devices successfully"
 }
 ```
+
+> **Sejak 2026-06-18:** semua access token lama (termasuk yang dipakai memanggil endpoint ini) langsung invalid. Cocok untuk skenario "saya rasa akun saya dibajak".
+
+---
+
+### 6.1 List Active Sessions
+
+Daftar sesi aktif (non-revoked) milik caller — buat layar "perangkat saya". `token_hash` **tidak pernah** dibocorkan; hanya metadata device.
+
+```
+GET /core/v1/auth/sessions
+```
+
+**Auth:** `Authorization: Bearer <access_token>`
+
+**Query params (opsional):**
+
+| Param | Type | Keterangan |
+|-------|------|------------|
+| `current_refresh_token` | string | Kalau FE mengirimkan refresh token-nya saat ini, sesi yang cocok ditandai `is_current: true` ("perangkat ini"). Opsional — kalau tidak dikirim, tidak ada sesi yang ditandai current. Tidak pernah di-log. |
+
+**Response (200):**
+```json
+{
+  "data": [
+    {
+      "id": "11111111-...",
+      "device_info": { "name": "Chrome on macOS", "type": "desktop", "os": "macOS", "browser": "Chrome" },
+      "ip_address": "103.xx.xx.xx",
+      "last_used_at": "2026-06-18T09:00:00Z",
+      "created_at": "2026-06-10T08:00:00Z",
+      "is_current": true
+    }
+  ],
+  "message": "Sessions retrieved successfully"
+}
+```
+
+| Field | Type | Keterangan |
+|-------|------|------------|
+| `id` | string (UUID) | Session id — dipakai untuk revoke (endpoint 6.2) |
+| `device_info` | object | Metadata device (name/type/os/browser), bisa kosong |
+| `ip_address` | string\|null | IP saat sesi dibuat |
+| `last_used_at` | string\|null | Terakhir refresh dipakai |
+| `created_at` | string | Kapan sesi dibuat |
+| `is_current` | bool | `true` kalau ini sesi dari refresh token yang dikirim di `current_refresh_token` |
+
+---
+
+### 6.2 Revoke a Session
+
+Cabut satu sesi milik caller berdasarkan id. Hanya bisa mencabut sesi sendiri — id milik user lain (atau id tidak dikenal) mengembalikan **404** (bukan 403) supaya id tidak bisa ditebak-tebak.
+
+```
+DELETE /core/v1/auth/sessions/:id
+```
+
+**Auth:** `Authorization: Bearer <access_token>`
+
+**Response (200):**
+```json
+{
+  "data": null,
+  "message": "Session revoked successfully"
+}
+```
+
+**Errors:**
+
+| Status | Message | Kapan |
+|--------|---------|-------|
+| 404 | Session not found | Id bukan milik caller, tidak ada, atau sudah ter-revoke |
+
+> **Catatan:** revoke sesi menghentikan **refresh** berikutnya untuk device itu. Access token yang sudah terlanjur dipegang device tersebut masih jalan sampai expiry alami — untuk mematikannya seketika gunakan `logout` / `logout-all` (denylist access token).
 
 ---
 
@@ -771,10 +866,14 @@ Common:
 
 ### Token Expiry
 
-| Token | Default Expiry |
-|-------|---------------|
-| Access token | 24 jam |
-| Refresh token | 7 hari |
+| Token | Default Expiry | Env |
+|-------|---------------|-----|
+| Access token | 24 jam | `JWT_EXPIRATION` |
+| Refresh token | 7 hari | `JWT_REFRESH_EXPIRATION` |
+
+Keduanya dikonfigurasi via env (format Go duration, mis. `24h`, `168h`). `expires_in` di response signin/switch-company/refresh selalu mengikuti `JWT_EXPIRATION` aktual, jadi tidak pernah drift dari umur token sebenarnya.
+
+**Revocation:** setelah `logout` / `logout-all`, access token langsung invalid (denylist Redis, fail-open saat Redis down) — tidak menunggu expiry alami. Lihat changelog 2026-06-18 di atas.
 
 ---
 
