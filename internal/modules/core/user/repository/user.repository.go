@@ -11,9 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go/internal/modules/core/user/domain"
-	"venturo-skeleton-go/internal/modules/core/user/dto"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/internal/modules/core/user/domain"
+	"venturo-skeleton-go-simple/internal/modules/core/user/dto"
+	"venturo-skeleton-go-simple/pkg/logger"
 )
 
 type UserRepository struct {
@@ -31,7 +31,7 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
 
 // CreateTx creates a new user inside an existing transaction. Use this when
 // the caller needs to atomically create the user together with related rows
-// (e.g. core.company_users) so a partial state cannot leak on failure.
+// (e.g. core.user_roles) so a partial state cannot leak on failure.
 func (r *UserRepository) CreateTx(ctx context.Context, tx pgx.Tx, user *domain.User) error {
 	return r.createWith(ctx, tx, user)
 }
@@ -138,46 +138,6 @@ func (r *UserRepository) FindByID(ctx context.Context, id string) (*domain.User,
 	return &user, nil
 }
 
-// IsUserVisibleToScope reports whether userID is visible to a non-super-admin
-// caller whose tenant scope is anchored at scopeCompanyID (and who is
-// identified as callerUserID for the self-created fallback).
-//
-// Visibility rules mirror FindAll: membership in scopeCompanyID or any of its
-// descendants, OR the user was created by the caller.
-func (r *UserRepository) IsUserVisibleToScope(ctx context.Context, userID, scopeCompanyID, callerUserID string) (bool, error) {
-	query := `
-		WITH RECURSIVE visible_companies AS (
-			SELECT id FROM core.companies
-			 WHERE id = $2 AND deleted_at IS NULL
-			UNION ALL
-			SELECT c.id FROM core.companies c
-			  JOIN visible_companies v ON c.parent_id = v.id
-			 WHERE c.deleted_at IS NULL
-		)
-		SELECT EXISTS (
-			SELECT 1 FROM core.users u
-			 WHERE u.id = $1
-			   AND u.deleted_at IS NULL
-			   AND (
-				EXISTS (
-					SELECT 1 FROM core.company_users cu
-					 WHERE cu.user_id = u.id
-					   AND cu.deleted_at IS NULL
-					   AND cu.company_id IN (SELECT id FROM visible_companies)
-				)
-				OR u.created_by = $3
-			   )
-		)
-	`
-
-	var visible bool
-	if err := r.db.QueryRow(ctx, query, userID, scopeCompanyID, callerUserID).Scan(&visible); err != nil {
-		logger.Error("Failed to check user visibility", logger.Err(err))
-		return false, err
-	}
-	return visible, nil
-}
-
 // FindByEmail finds a user by email
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
 	query := `
@@ -274,57 +234,13 @@ func (r *UserRepository) FindByEmailOrUsername(ctx context.Context, login string
 	return &user, nil
 }
 
-// FindAll finds all users with pagination and filtering.
-//
-// Tenant visibility rules (applied when params.ScopeCompanyID is set, i.e. the
-// caller is NOT a super admin):
-//
-//  1. User has a membership in core.company_users for the scope company itself
-//     or any of its descendants (traversed recursively via parent_id), OR
-//  2. User was created by the caller (fallback, so freshly-created users that
-//     have not yet been attached to a company are still visible to their
-//     creator).
-//
-// The tree walk is one-directional (root → descendants), so a subsidiary admin
-// cannot see users of its parent holding company. Super admins pass nil for
-// ScopeCompanyID to bypass this filter entirely.
+// FindAll finds all users with pagination and filtering
 func (r *UserRepository) FindAll(ctx context.Context, params *dto.UserQueryParams) ([]domain.User, int64, error) {
 	var conditions []string
 	var args []interface{}
 	argIndex := 1
 
 	conditions = append(conditions, "u.deleted_at IS NULL")
-
-	// Tenant scope: visible_companies = scope company + all descendants.
-	// Build as a CTE prefix and reference it from the WHERE clause via EXISTS.
-	var ctePrefix string
-	if params.ScopeCompanyID != nil {
-		ctePrefix = fmt.Sprintf(`
-			WITH RECURSIVE visible_companies AS (
-				SELECT id FROM core.companies
-				 WHERE id = $%d AND deleted_at IS NULL
-				UNION ALL
-				SELECT c.id FROM core.companies c
-				  JOIN visible_companies v ON c.parent_id = v.id
-				 WHERE c.deleted_at IS NULL
-			)
-		`, argIndex)
-		args = append(args, *params.ScopeCompanyID)
-		argIndex++
-
-		visibilityClause := `EXISTS (
-			SELECT 1 FROM core.company_users cu
-			 WHERE cu.user_id = u.id
-			   AND cu.deleted_at IS NULL
-			   AND cu.company_id IN (SELECT id FROM visible_companies)
-		)`
-		if params.ScopeCreatedBy != nil {
-			visibilityClause = fmt.Sprintf("(%s OR u.created_by = $%d)", visibilityClause, argIndex)
-			args = append(args, *params.ScopeCreatedBy)
-			argIndex++
-		}
-		conditions = append(conditions, visibilityClause)
-	}
 
 	if params.Search != "" {
 		conditions = append(conditions, fmt.Sprintf(
@@ -341,32 +257,10 @@ func (r *UserRepository) FindAll(ctx context.Context, params *dto.UserQueryParam
 		argIndex++
 	}
 
-	if params.BranchID != nil {
-		// A user matches the branch filter when either:
-		//  (a) they have an explicit assignment to this branch, OR
-		//  (b) they have no branch assignments at all (unrestricted access —
-		//      consistent with BranchScope middleware semantics).
-		conditions = append(conditions, fmt.Sprintf(`(
-			EXISTS (
-				SELECT 1 FROM core.user_branches ub
-				 WHERE ub.user_id = u.id
-				   AND ub.branch_id = $%d
-				   AND ub.deleted_at IS NULL
-			)
-			OR NOT EXISTS (
-				SELECT 1 FROM core.user_branches ub
-				 WHERE ub.user_id = u.id
-				   AND ub.deleted_at IS NULL
-			)
-		)`, argIndex))
-		args = append(args, *params.BranchID)
-		argIndex++
-	}
-
 	whereClause := strings.Join(conditions, " AND ")
 
 	// Count query
-	countQuery := fmt.Sprintf("%sSELECT COUNT(*) FROM core.users u WHERE %s", ctePrefix, whereClause)
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM core.users u WHERE %s", whereClause)
 	var total int64
 	err := r.db.QueryRow(ctx, countQuery, args...).Scan(&total)
 	if err != nil {
@@ -376,7 +270,7 @@ func (r *UserRepository) FindAll(ctx context.Context, params *dto.UserQueryParam
 
 	// Data query
 	offset := (params.Page - 1) * params.Limit
-	dataQuery := fmt.Sprintf(`%sSELECT u.id, u.email, u.username, COALESCE(u.password_hash, '') AS password_hash, u.full_name, u.phone, u.avatar_url,
+	dataQuery := fmt.Sprintf(`SELECT u.id, u.email, u.username, COALESCE(u.password_hash, '') AS password_hash, u.full_name, u.phone, u.avatar_url,
 		       u.is_active, u.is_email_verified, u.email_verified_at,
 		       u.failed_login_count, u.locked_until, u.last_login_at,
 		       u.created_at, u.created_by, u.updated_at, u.updated_by, u.deleted_at, u.deleted_by
@@ -384,7 +278,7 @@ func (r *UserRepository) FindAll(ctx context.Context, params *dto.UserQueryParam
 		WHERE %s
 		ORDER BY u.created_at DESC
 		LIMIT $%d OFFSET $%d
-	`, ctePrefix, whereClause, argIndex, argIndex+1)
+	`, whereClause, argIndex, argIndex+1)
 
 	args = append(args, params.Limit, offset)
 

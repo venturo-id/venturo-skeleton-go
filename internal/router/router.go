@@ -3,27 +3,21 @@ package router
 import (
 	"context"
 	"time"
-	"venturo-skeleton-go/internal/config"
-	"venturo-skeleton-go/internal/middleware"
+	"venturo-skeleton-go-simple/internal/config"
+	"venturo-skeleton-go-simple/internal/middleware"
 
 	// Core modules
-	"venturo-skeleton-go/internal/modules/core/api_key"
-	"venturo-skeleton-go/internal/modules/core/approval"
-	"venturo-skeleton-go/internal/modules/core/auth"
-	"venturo-skeleton-go/internal/modules/core/branch"
-	"venturo-skeleton-go/internal/modules/core/client"
-	"venturo-skeleton-go/internal/modules/core/company"
-	"venturo-skeleton-go/internal/modules/core/role"
-	"venturo-skeleton-go/internal/modules/core/translation_overrides"
-	"venturo-skeleton-go/internal/modules/core/user"
-	userRepo "venturo-skeleton-go/internal/modules/core/user/repository"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key"
+	"venturo-skeleton-go-simple/internal/modules/core/auth"
+	"venturo-skeleton-go-simple/internal/modules/core/role"
+	"venturo-skeleton-go-simple/internal/modules/core/user"
+	userRepo "venturo-skeleton-go-simple/internal/modules/core/user/repository"
 
-	"venturo-skeleton-go/internal/shared/audit"
-	"venturo-skeleton-go/internal/shared/authz"
-	sharedRedis "venturo-skeleton-go/internal/shared/redis"
+	"venturo-skeleton-go-simple/internal/shared/authz"
+	sharedRedis "venturo-skeleton-go-simple/internal/shared/redis"
 
-	pkgfirebase "venturo-skeleton-go/pkg/firebase"
-	"venturo-skeleton-go/pkg/logger"
+	pkgfirebase "venturo-skeleton-go-simple/pkg/firebase"
+	"venturo-skeleton-go-simple/pkg/logger"
 
 	"github.com/gin-contrib/cors"
 	ginzap "github.com/gin-contrib/zap"
@@ -78,11 +72,6 @@ func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 	// Core v1 routes
 	coreV1 := router.Group("/core/v1")
 	{
-		// Initialize and setup client module. Must come before auth so
-		// that SignUp can provision a client for new registrants.
-		clientModule := client.Initialize(db)
-		clientModule.SetupRoutes(coreV1)
-
 		// Initialize and setup auth module
 		authModule := auth.Initialize(db, cfg)
 		authModule.SetupRoutes(coreV1)
@@ -116,71 +105,20 @@ func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 
 		// Wire the permission cache now that both Redis and the role repo
 		// exist. The role repo acts as the authoritative fetcher on cache
-		// miss; role service uses the same cache to invalidate stale
-		// entries when role permissions or assignments change; auth service
-		// uses it to serve /auth/me without hitting the DB on every call.
+		// miss; role and user services use the same cache to invalidate
+		// stale entries when role permissions or assignments change; auth
+		// service uses it to serve /auth/me without hitting the DB on every
+		// call.
 		authzService := authz.NewService(redisClient, roleModule.Repository, cfg.Redis.PermissionTTL)
 		middleware.SetAuthzService(authzService)
 		roleModule.Service.SetPermissionCacheInvalidator(authzService)
 		authModule.Service.SetPermissionReader(authzService)
-
-		// Initialize and setup company module
-		companyModule := company.Initialize(db)
-		companyModule.SetupRoutes(coreV1)
-		companyModule.SetupUserCompanyRoutes(coreV1)
-
-		// Initialize and setup branch module
-		branchModule := branch.Initialize(db)
-		branchModule.SetupRoutes(coreV1)
-		branchModule.SetupUserBranchRoutes(coreV1)
-
-		// Wire up auth service dependencies for company operations
-		authModule.Service.SetCompanyUserRepo(companyModule.UserRepository)
-		authModule.Service.SetCompanyRepo(companyModule.Repository)
 		authModule.Service.SetRoleRepo(roleModule.Repository)
-		authModule.Service.SetBranchRepo(branchModule.Repository)
-		authModule.Service.SetClientService(clientModule.Service)
 
-		// Wire the client lookup into company service so Create can
-		// resolve client_id for owners who have no primary company yet.
-		companyModule.Service.SetClientLookup(clientModule.Repository)
-
-		// Wire branch repo into company service so Create seeds a default branch
-		companyModule.Service.SetBranchRepo(branchModule.Repository)
-
-		// Wire default admin role so the creator gets full company-scoped
-		// permissions out of the box (mirrors SignUp).
-		companyModule.Service.SetDefaultAdminRoleID(cfg.Auth.DefaultAdminRoleID)
-
-		// Wire the company-scope resolver into the user-branch service so
-		// non-super-admin callers can only assign branches inside their
-		// company subtree.
-		branchModule.UserBranchService.SetScopeResolver(companyModule.Repository)
-
-		// Wire the company membership lookup into the branch service so
-		// /branches/by-companies can resolve non-super_admin callers'
-		// allowed companies from core.company_users.
-		branchModule.Service.SetCompanyMembershipLookup(companyModule.UserRepository)
-
-		// Wire up user service dependencies for company sync on create
-		userModule.Service.SetCompanySyncer(companyModule.Service)
-		userModule.Service.SetBranchSyncer(branchModule.UserBranchService)
+		// Wire role assignment into the user service: create/update with
+		// role_id writes core.user_roles and drops the user's cached set.
 		userModule.Service.SetRoleLookup(roleModule.Repository)
-
-		// Wire the live company-context verifier so that any endpoint guarded
-		// by middleware.CompanyContext rejects stale JWT company claims (e.g.
-		// user removed from the company, company soft-deleted/deactivated).
-		middleware.SetCompanyContextVerifier(companyModule.UserRepository)
-
-		// User module routes only run JWTAuth (not CompanyContext) because
-		// super_admin paths must remain accessible without a tenant. Inject
-		// the verifier directly into the user handler so its inline tenant
-		// scope check enforces the same staleness guarantees.
-		userModule.Handler.SetCompanyVerifier(companyModule.UserRepository)
-
-		// Wire the branch-scope resolver so middleware.BranchScope() can
-		// narrow branches reads to the caller's user_branches set.
-		middleware.SetUserBranchResolver(branchModule.UserBranchRepository)
+		userModule.Service.SetPermissionCacheInvalidator(authzService)
 
 		// Initialize and setup API key module
 		apiKeyModule := api_key.Initialize(db, roleModule.Repository)
@@ -188,24 +126,7 @@ func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
 
 		// Wire up API key validator for middleware
 		middleware.SetApiKeyValidator(apiKeyModule.Service)
-
-		// Initialize and setup Approval module (depends on role repo for
-		// snapshotting role names at submission time).
-		approvalModule := approval.Initialize(db, roleModule.Repository)
-		approvalModule.SetupRoutes(coreV1)
-
-		// Initialize and setup Translation Overrides module. Exposes both
-		// an unauthenticated bootstrap endpoint (resolves client by slug)
-		// and super_admin CRUD nested under /admin/clients/:client_id.
-		translationOverridesModule := translation_overrides.Initialize(db, clientModule.Service)
-		translationOverridesModule.SetupRoutes(coreV1)
 	}
-
-	// Shared audit module (polymorphic, used by any feature that wants
-	// per-entity history). Initialized after the core group so its routes
-	// mount under /core/v1.
-	auditModule := audit.Initialize(db)
-	auditModule.SetupRoutes(coreV1)
 
 	log.Info("Routes setup completed", zap.Int("routes", len(router.Routes())))
 }

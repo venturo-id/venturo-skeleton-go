@@ -7,15 +7,13 @@ package dto
 // same store/rendering path when it rehydrates from /me after a page
 // reload or when it re-syncs after a 403.
 //
-// `permissions` reflects the caller's *current* effective set in the
-// active company (from Redis / authz cache, falling back to DB on cache
-// miss) — not a snapshot of what the JWT was minted with.
+// `permissions` reflects the caller's *current* effective set (from
+// Redis / authz cache, falling back to DB on cache miss) — not a
+// snapshot of what the JWT was minted with.
 type MeResponse struct {
-	User        UserInfo     `json:"user"`
-	Company     *CompanyInfo `json:"company,omitempty"`
-	Client      *ClientInfo  `json:"client,omitempty"`
-	Roles       []string     `json:"roles"`
-	Permissions []string     `json:"permissions"`
+	User        UserInfo `json:"user"`
+	Roles       []string `json:"roles"`
+	Permissions []string `json:"permissions"`
 
 	// IsSuperAdmin mirrors the JWT claim of the same name. Exposed here
 	// so FE can render admin-only UI without decoding the JWT. Super

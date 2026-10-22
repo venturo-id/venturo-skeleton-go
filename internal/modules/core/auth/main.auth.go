@@ -4,12 +4,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go/internal/config"
-	"venturo-skeleton-go/internal/middleware"
-	"venturo-skeleton-go/internal/modules/core/auth/handler"
-	"venturo-skeleton-go/internal/modules/core/auth/repository"
-	"venturo-skeleton-go/internal/modules/core/auth/service"
-	userRepo "venturo-skeleton-go/internal/modules/core/user/repository"
+	"venturo-skeleton-go-simple/internal/config"
+	"venturo-skeleton-go-simple/internal/middleware"
+	"venturo-skeleton-go-simple/internal/modules/core/auth/handler"
+	"venturo-skeleton-go-simple/internal/modules/core/auth/repository"
+	"venturo-skeleton-go-simple/internal/modules/core/auth/service"
+	userRepo "venturo-skeleton-go-simple/internal/modules/core/user/repository"
 )
 
 type AuthModule struct {
@@ -43,8 +43,6 @@ func (m *AuthModule) SetupRoutes(router *gin.RouterGroup) {
 		// Protected routes
 		auth.POST("/logout", middleware.JWTAuth(), m.Handler.Logout)
 		auth.POST("/logout-all", middleware.JWTAuth(), m.Handler.LogoutAll)
-		auth.POST("/switch-company", middleware.JWTAuth(), m.Handler.SwitchCompany)
-		auth.GET("/companies", middleware.JWTAuth(), m.Handler.GetMyCompanies)
 		auth.GET("/me", middleware.JWTAuth(), m.Handler.GetMe)
 	}
 }

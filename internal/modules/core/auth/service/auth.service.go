@@ -12,20 +12,17 @@ import (
 
 	"github.com/google/uuid"
 
-	"venturo-skeleton-go/internal/config"
-	"venturo-skeleton-go/internal/modules/core/auth/domain"
-	"venturo-skeleton-go/internal/modules/core/auth/dto"
-	"venturo-skeleton-go/internal/modules/core/auth/repository"
-	branchDomain "venturo-skeleton-go/internal/modules/core/branch/domain"
-	clientDomain "venturo-skeleton-go/internal/modules/core/client/domain"
-	companyDomain "venturo-skeleton-go/internal/modules/core/company/domain"
-	userDomain "venturo-skeleton-go/internal/modules/core/user/domain"
-	userRepo "venturo-skeleton-go/internal/modules/core/user/repository"
-	"venturo-skeleton-go/pkg/crypto"
-	pkgfirebase "venturo-skeleton-go/pkg/firebase"
-	"venturo-skeleton-go/pkg/jwt"
-	"venturo-skeleton-go/pkg/logger"
-	"venturo-skeleton-go/pkg/token"
+	"venturo-skeleton-go-simple/internal/config"
+	"venturo-skeleton-go-simple/internal/modules/core/auth/domain"
+	"venturo-skeleton-go-simple/internal/modules/core/auth/dto"
+	"venturo-skeleton-go-simple/internal/modules/core/auth/repository"
+	userDomain "venturo-skeleton-go-simple/internal/modules/core/user/domain"
+	userRepo "venturo-skeleton-go-simple/internal/modules/core/user/repository"
+	"venturo-skeleton-go-simple/pkg/crypto"
+	pkgfirebase "venturo-skeleton-go-simple/pkg/firebase"
+	"venturo-skeleton-go-simple/pkg/jwt"
+	"venturo-skeleton-go-simple/pkg/logger"
+	"venturo-skeleton-go-simple/pkg/token"
 )
 
 var (
@@ -38,8 +35,6 @@ var (
 	ErrInvalidRefreshToken   = errors.New("invalid refresh token")
 	ErrRefreshTokenExpired   = errors.New("refresh token expired")
 	ErrRefreshTokenRevoked   = errors.New("refresh token revoked")
-	ErrCompanyNotFound       = errors.New("company not found")
-	ErrNotCompanyMember      = errors.New("user is not a member of this company")
 
 	// Google sign-in errors
 	ErrFirebaseNotConfigured = errors.New("google sign-in not configured")
@@ -59,47 +54,17 @@ const (
 	AccessTokenExpiryHours = 24
 )
 
-// CompanyUserRepository interface for company user operations
-type CompanyUserRepository interface {
-	IsMember(ctx context.Context, userID, companyID string) (bool, error)
-	GetPrimaryCompany(ctx context.Context, userID string) (*companyDomain.CompanyUser, error)
-	FindByUser(ctx context.Context, userID string) ([]companyDomain.CompanyUser, error)
-	FindByUserWithDetails(ctx context.Context, userID string) ([]companyDomain.UserCompanyDetail, error)
-	Create(ctx context.Context, cu *companyDomain.CompanyUser) error
-}
-
-// CompanyRepository interface for company operations
-type CompanyRepository interface {
-	FindByID(ctx context.Context, id string) (*companyDomain.Company, error)
-	Create(ctx context.Context, company *companyDomain.Company) error
-}
-
 // RoleRepository interface for role operations
 type RoleRepository interface {
-	GetUserPermissions(ctx context.Context, userID string, companyID *string) ([]string, error)
-	GetUserRoleNames(ctx context.Context, userID string, companyID *string) ([]string, error)
-}
-
-// BranchRepository interface for branch operations
-type BranchRepository interface {
-	Create(ctx context.Context, branch *branchDomain.Branch) error
-}
-
-// ClientService is the slice of the client service that auth needs:
-//   - CreateForUser: SignUp provisions a new client for a registrant.
-//   - GetByID:       SignIn / SwitchCompany resolve client_id + slug
-//                    from the caller's company so both show up in the
-//                    JWT and the response payload.
-type ClientService interface {
-	CreateForUser(ctx context.Context, userID, username, displayName string) (*clientDomain.Client, error)
-	GetByID(ctx context.Context, id string) (*clientDomain.Client, error)
+	GetUserPermissions(ctx context.Context, userID string) ([]string, error)
+	GetUserRoleNames(ctx context.Context, userID string) ([]string, error)
 }
 
 // PermissionReader is the narrow seam GetMe needs from the authz
 // package. Implemented by *authz.Service — accepted as an interface so
 // auth doesn't import authz directly (and so tests can fake it).
 type PermissionReader interface {
-	GetPermissions(ctx context.Context, userID, companyID string) ([]string, error)
+	GetPermissions(ctx context.Context, userID string) ([]string, error)
 }
 
 // FirebaseVerifier is the seam the auth service uses to verify Firebase
@@ -116,11 +81,7 @@ type AuthService struct {
 	userRepo         *userRepo.UserRepository
 	userIdentityRepo *userRepo.UserIdentityRepository
 	refreshTokenRepo *repository.RefreshTokenRepository
-	companyUserRepo  CompanyUserRepository
-	companyRepo      CompanyRepository
 	roleRepo         RoleRepository
-	branchRepo       BranchRepository
-	clientService    ClientService
 	permissionReader PermissionReader
 	firebase         FirebaseVerifier
 	config           *config.Config
@@ -151,24 +112,9 @@ func (s *AuthService) SetFirebaseVerifier(f FirebaseVerifier) {
 	s.firebase = f
 }
 
-// SetCompanyUserRepo sets the company user repository (for dependency injection after initialization)
-func (s *AuthService) SetCompanyUserRepo(repo CompanyUserRepository) {
-	s.companyUserRepo = repo
-}
-
-// SetCompanyRepo sets the company repository
-func (s *AuthService) SetCompanyRepo(repo CompanyRepository) {
-	s.companyRepo = repo
-}
-
 // SetRoleRepo sets the role repository
 func (s *AuthService) SetRoleRepo(repo RoleRepository) {
 	s.roleRepo = repo
-}
-
-// SetBranchRepo sets the branch repository
-func (s *AuthService) SetBranchRepo(repo BranchRepository) {
-	s.branchRepo = repo
 }
 
 // SetPermissionReader wires the authz-backed permission cache used by
@@ -176,32 +122,6 @@ func (s *AuthService) SetBranchRepo(repo BranchRepository) {
 // correct, but bypasses Redis.
 func (s *AuthService) SetPermissionReader(r PermissionReader) {
 	s.permissionReader = r
-}
-
-// resolveClientInfo looks up a client by id and returns its
-// (id, slug, *ClientInfo). On any failure (client service missing,
-// lookup error, or unknown id) it returns empty strings and nil — the
-// caller silently degrades so a missing client never blocks login.
-// Used by SignIn / SwitchCompany to enrich the JWT and response.
-func (s *AuthService) resolveClientInfo(ctx context.Context, clientID string) (string, string, *dto.ClientInfo) {
-	if s.clientService == nil || clientID == "" {
-		return "", "", nil
-	}
-	c, err := s.clientService.GetByID(ctx, clientID)
-	if err != nil || c == nil {
-		return "", "", nil
-	}
-	return c.ID, c.Slug, &dto.ClientInfo{
-		ID:   c.ID,
-		Slug: c.Slug,
-		Name: c.Name,
-	}
-}
-
-// SetClientService wires the client service so SignUp can provision a
-// new client row (one-per-registrant) before the first company is created.
-func (s *AuthService) SetClientService(svc ClientService) {
-	s.clientService = svc
 }
 
 // SignUp registers a new user
@@ -251,104 +171,11 @@ func (s *AuthService) SignUp(ctx context.Context, req *dto.SignUpRequest) (*dto.
 		return nil, err
 	}
 
-	// Provision a client (registration-level tenant) for this user before
-	// creating any companies. One signup = one client; companies created
-	// later (via POST /core/v1/companies) will inherit this client_id.
-	if s.clientService == nil {
-		return nil, errors.New("client service not set")
-	}
-	var newClient *clientDomain.Client
-	var displayName string
-	if user.FullName != nil {
-		displayName = *user.FullName
-	}
-	newClient, err = s.clientService.CreateForUser(ctx, user.ID, user.Username, displayName)
-	if err != nil {
-		logger.Error("Failed to create client during signup", logger.Err(err))
-		return nil, err
-	}
-
-	// Create company scoped to the new client.
-	companyID := uuid.New().String()
-	newCompany := &companyDomain.Company{
-		ID:        companyID,
-		ClientID:  newClient.ID,
-		Name:      req.CompanyName,
-		Type:      companyDomain.CompanyTypeHolding,
-		OwnerID:   user.ID,
-		Sort:      1,
-		IsActive:  true,
-		CreatedAt: now,
-		CreatedBy: &user.ID,
-		UpdatedAt: now,
-		UpdatedBy: &user.ID,
-	}
-
-	if s.companyRepo == nil {
-		return nil, errors.New("company repository not set")
-	}
-	err = s.companyRepo.Create(ctx, newCompany)
-	if err != nil {
-		logger.Error("Failed to create company during signup", logger.Err(err))
-		return nil, err
-	}
-
-	// Link user to company as primary member with the default admin role
-	// (so the owner has full company-scoped permissions out of the box).
-	if s.companyUserRepo == nil {
-		return nil, errors.New("company user repository not set")
-	}
-	var defaultRoleID *string
-	if s.config != nil && s.config.Auth.DefaultAdminRoleID != "" {
-		id := s.config.Auth.DefaultAdminRoleID
-		defaultRoleID = &id
-	}
-	companyUser := &companyDomain.CompanyUser{
-		ID:        uuid.New().String(),
-		CompanyID: companyID,
-		UserID:    user.ID,
-		RoleID:    defaultRoleID,
-		IsPrimary: true,
-		IsActive:  true,
-		JoinedAt:  now,
-		CreatedAt: now,
-		CreatedBy: &user.ID,
-		UpdatedAt: now,
-		UpdatedBy: &user.ID,
-	}
-	err = s.companyUserRepo.Create(ctx, companyUser)
-	if err != nil {
-		logger.Error("Failed to link user to company during signup", logger.Err(err))
-		return nil, err
-	}
-
-	// Create default branch "Cabang Pusat"
-	if s.branchRepo == nil {
-		return nil, errors.New("branch repository not set")
-	}
-	defaultBranch := &branchDomain.Branch{
-		ID:        uuid.New().String(),
-		CompanyID: companyID,
-		Name:      "Cabang Pusat",
-		Sort:      1,
-		IsDefault: true,
-		IsActive:  true,
-		CreatedAt: now,
-		CreatedBy: &user.ID,
-		UpdatedAt: now,
-		UpdatedBy: &user.ID,
-	}
-	err = s.branchRepo.Create(ctx, defaultBranch)
-	if err != nil {
-		logger.Error("Failed to create default branch during signup", logger.Err(err))
-		return nil, err
-	}
-
-	logger.Info("User signed up with company",
+	// No role is assigned here: a self-registered user starts with zero
+	// access until a super_admin grants a role.
+	logger.Info("User signed up",
 		logger.String("user_id", user.ID),
-		logger.String("email", user.Email),
-		logger.String("company_id", companyID),
-		logger.String("company_name", req.CompanyName))
+		logger.String("email", user.Email))
 
 	return &dto.SignUpResponse{
 		Message: "User registered successfully.",
@@ -357,10 +184,6 @@ func (s *AuthService) SignUp(ctx context.Context, req *dto.SignUpRequest) (*dto.
 			Email:    user.Email,
 			Username: user.Username,
 			FullName: user.FullName,
-		},
-		Company: dto.CompanyInfo{
-			ID:   companyID,
-			Name: req.CompanyName,
 		},
 	}, nil
 }
@@ -414,49 +237,20 @@ func (s *AuthService) SignIn(ctx context.Context, req *dto.SignInRequest, device
 	// Update last login
 	_ = s.userRepo.UpdateLastLogin(ctx, user.ID)
 
-	// Try to load primary company for auto-scoped permissions
-	var companyID, companyName string
-	var companyInfo *dto.CompanyInfo
-	var clientID, clientSlug string
-	var clientInfo *dto.ClientInfo
-
-	if s.companyUserRepo != nil {
-		primaryMembership, _ := s.companyUserRepo.GetPrimaryCompany(ctx, user.ID)
-		if primaryMembership != nil {
-			companyID = primaryMembership.CompanyID
-			if s.companyRepo != nil {
-				company, _ := s.companyRepo.FindByID(ctx, companyID)
-				if company != nil {
-					companyName = company.Name
-					companyInfo = &dto.CompanyInfo{
-						ID:   company.ID,
-						Name: company.Name,
-					}
-					clientID, clientSlug, clientInfo = s.resolveClientInfo(ctx, company.ClientID)
-				}
-			}
-		}
-	}
-
-	// Get user roles and permissions (scoped to primary company if available)
+	// Get user roles and permissions
 	var roles, permissions []string
 	if s.roleRepo != nil {
-		if companyID != "" {
-			roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID, &companyID)
-			permissions, _ = s.roleRepo.GetUserPermissions(ctx, user.ID, &companyID)
-		} else {
-			roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID, nil)
-			permissions, _ = s.roleRepo.GetUserPermissions(ctx, user.ID, nil)
-		}
+		roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID)
+		permissions, _ = s.roleRepo.GetUserPermissions(ctx, user.ID)
 	}
 
-	// Generate access token with company context
+	// Generate access token
 	fullName := ""
 	if user.FullName != nil {
 		fullName = *user.FullName
 	}
 	isSuperAdmin := containsRole(roles, jwt.RoleSuperAdmin)
-	accessToken, err := jwt.GenerateToken(user.ID, companyID, companyName, clientID, clientSlug, user.Email, user.Username, fullName, isSuperAdmin, roles)
+	accessToken, err := jwt.GenerateToken(user.ID, user.Email, user.Username, fullName, isSuperAdmin, roles)
 	if err != nil {
 		logger.Error("Failed to generate access token", logger.Err(err))
 		return nil, err
@@ -488,8 +282,16 @@ func (s *AuthService) SignIn(ctx context.Context, req *dto.SignInRequest, device
 
 	logger.Info("User signed in",
 		logger.String("user_id", user.ID),
-		logger.String("email", user.Email),
-		logger.String("company_id", companyID))
+		logger.String("email", user.Email))
+
+	// A user without roles (e.g. fresh signup) must still get JSON arrays,
+	// not null — mirrors issueGoogleTokens.
+	if permissions == nil {
+		permissions = []string{}
+	}
+	if roles == nil {
+		roles = []string{}
+	}
 
 	return &dto.SignInResponse{
 		AccessToken:  accessToken,
@@ -502,8 +304,6 @@ func (s *AuthService) SignIn(ctx context.Context, req *dto.SignInRequest, device
 			Username: user.Username,
 			FullName: user.FullName,
 		},
-		Company:     companyInfo,
-		Client:      clientInfo,
 		Roles:       roles,
 		Permissions: permissions,
 	}, nil
@@ -549,7 +349,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshTokenStr string) 
 	// looked up from Redis on subsequent requests via authz.
 	var roles []string
 	if s.roleRepo != nil {
-		roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID, nil)
+		roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID)
 	}
 
 	// Generate new access token
@@ -558,7 +358,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshTokenStr string) 
 		fullName = *user.FullName
 	}
 	isSuperAdmin := containsRole(roles, jwt.RoleSuperAdmin)
-	accessToken, err := jwt.GenerateToken(user.ID, "", "", "", "", user.Email, user.Username, fullName, isSuperAdmin, roles)
+	accessToken, err := jwt.GenerateToken(user.ID, user.Email, user.Username, fullName, isSuperAdmin, roles)
 	if err != nil {
 		logger.Error("Failed to generate access token", logger.Err(err))
 		return nil, err
@@ -623,107 +423,11 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
 	return nil
 }
 
-// SwitchCompany switches the user's active company context
-func (s *AuthService) SwitchCompany(ctx context.Context, userID, companyID string) (*dto.SwitchCompanyResponse, error) {
-	// Check if user is a member of the company
-	if s.companyUserRepo == nil {
-		return nil, errors.New("company user repository not set")
-	}
-
-	isMember, err := s.companyUserRepo.IsMember(ctx, userID, companyID)
-	if err != nil {
-		return nil, err
-	}
-	if !isMember {
-		return nil, ErrNotCompanyMember
-	}
-
-	// Get user
-	user, err := s.userRepo.FindByID(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	if user == nil {
-		return nil, ErrUserNotActive
-	}
-
-	// Fetch company details
-	var companyName string
-	var clientID, clientSlug string
-	var clientInfo *dto.ClientInfo
-	if s.companyRepo != nil {
-		company, _ := s.companyRepo.FindByID(ctx, companyID)
-		if company != nil {
-			companyName = company.Name
-			clientID, clientSlug, clientInfo = s.resolveClientInfo(ctx, company.ClientID)
-		}
-	}
-	_ = clientInfo // switch-company response doesn't carry client info today; claim covers the FE
-
-	// Get user roles for the company. Permissions live in Redis and are
-	// fetched on the request path; we still load them here to return in
-	// the response body so the FE can update its UI without decoding
-	// the (now permission-less) JWT.
-	var roles, permissions []string
-	if s.roleRepo != nil {
-		roles, _ = s.roleRepo.GetUserRoleNames(ctx, userID, &companyID)
-		permissions, _ = s.roleRepo.GetUserPermissions(ctx, userID, &companyID)
-	}
-
-	// Generate new access token with company context
-	fullName := ""
-	if user.FullName != nil {
-		fullName = *user.FullName
-	}
-	isSuperAdmin := containsRole(roles, jwt.RoleSuperAdmin)
-	accessToken, err := jwt.GenerateToken(user.ID, companyID, companyName, clientID, clientSlug, user.Email, user.Username, fullName, isSuperAdmin, roles)
-	if err != nil {
-		logger.Error("Failed to generate access token", logger.Err(err))
-		return nil, err
-	}
-
-	// Generate new refresh token
-	refreshTokenStr, err := token.GenerateSecureToken(32)
-	if err != nil {
-		logger.Error("Failed to generate refresh token", logger.Err(err))
-		return nil, err
-	}
-
-	// Store refresh token
-	refreshToken := &domain.RefreshToken{
-		ID:        uuid.New().String(),
-		UserID:    user.ID,
-		TokenHash: hashToken(refreshTokenStr),
-		ExpiresAt: time.Now().Add(RefreshTokenExpiry),
-		CreatedAt: time.Now(),
-	}
-
-	err = s.refreshTokenRepo.Create(ctx, refreshToken)
-	if err != nil {
-		logger.Error("Failed to store refresh token", logger.Err(err))
-		return nil, err
-	}
-
-	return &dto.SwitchCompanyResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshTokenStr,
-		TokenType:    "Bearer",
-		ExpiresIn:    AccessTokenExpiryHours * 3600,
-		Company: dto.CompanyInfo{
-			ID:   companyID,
-			Name: companyName,
-		},
-		Roles:       roles,
-		Permissions: permissions,
-	}, nil
-}
-
-// GetMe returns the signed-in user's current profile, active company,
-// client context, roles, and *effective* permissions. Permissions come
-// from the authz cache (Redis) when wired; otherwise the role repo is
-// consulted directly. Intended for FE rehydration after a page reload
-// or re-sync after an unexpected 403.
-func (s *AuthService) GetMe(ctx context.Context, userID, companyID string, isSuperAdmin bool) (*dto.MeResponse, error) {
+// GetMe returns the signed-in user's current profile, roles, and
+// *effective* permissions. Permissions come from the authz cache (Redis)
+// when wired; otherwise the role repo is consulted directly. Intended for
+// FE rehydration after a page reload or re-sync after an unexpected 403.
+func (s *AuthService) GetMe(ctx context.Context, userID string, isSuperAdmin bool) (*dto.MeResponse, error) {
 	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -742,44 +446,25 @@ func (s *AuthService) GetMe(ctx context.Context, userID, companyID string, isSup
 		IsSuperAdmin: isSuperAdmin,
 	}
 
-	// Resolve company + client context when the caller has switched.
-	var companyScope *string
-	if companyID != "" && s.companyRepo != nil {
-		company, _ := s.companyRepo.FindByID(ctx, companyID)
-		if company != nil {
-			resp.Company = &dto.CompanyInfo{
-				ID:   company.ID,
-				Name: company.Name,
-			}
-			_, _, resp.Client = s.resolveClientInfo(ctx, company.ClientID)
-			cid := company.ID
-			companyScope = &cid
-		}
-	}
-
 	// Roles — always from the role repo. The list is small so there's
 	// no cache layer in front of it.
 	if s.roleRepo != nil {
-		resp.Roles, _ = s.roleRepo.GetUserRoleNames(ctx, userID, companyScope)
+		resp.Roles, _ = s.roleRepo.GetUserRoleNames(ctx, userID)
 	}
 
 	// Permissions — prefer the Redis-backed authz cache. Fall back to
 	// the role repo if the reader isn't wired (tests / bootstrapping).
 	switch {
 	case s.permissionReader != nil:
-		scope := ""
-		if companyScope != nil {
-			scope = *companyScope
-		}
-		resp.Permissions, err = s.permissionReader.GetPermissions(ctx, userID, scope)
+		resp.Permissions, err = s.permissionReader.GetPermissions(ctx, userID)
 		if err != nil {
 			logger.Warn("GetMe: permission reader failed, falling back to role repo", logger.Err(err))
 			if s.roleRepo != nil {
-				resp.Permissions, _ = s.roleRepo.GetUserPermissions(ctx, userID, companyScope)
+				resp.Permissions, _ = s.roleRepo.GetUserPermissions(ctx, userID)
 			}
 		}
 	case s.roleRepo != nil:
-		resp.Permissions, _ = s.roleRepo.GetUserPermissions(ctx, userID, companyScope)
+		resp.Permissions, _ = s.roleRepo.GetUserPermissions(ctx, userID)
 	}
 
 	if resp.Permissions == nil {
@@ -790,35 +475,6 @@ func (s *AuthService) GetMe(ctx context.Context, userID, companyID string, isSup
 	}
 
 	return resp, nil
-}
-
-// GetMyCompanies returns the list of companies the user has access to
-func (s *AuthService) GetMyCompanies(ctx context.Context, userID string) ([]dto.MyCompanyResponse, error) {
-	if s.companyUserRepo == nil {
-		return []dto.MyCompanyResponse{}, nil
-	}
-
-	details, err := s.companyUserRepo.FindByUserWithDetails(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-
-	companies := make([]dto.MyCompanyResponse, 0, len(details))
-	for _, d := range details {
-		companies = append(companies, dto.MyCompanyResponse{
-			ID:        d.CompanyID,
-			Name:      d.CompanyName,
-			Type:      d.CompanyType,
-			LogoURL:   d.LogoURL,
-			ParentID:  d.ParentID,
-			IsPrimary: d.IsPrimary,
-			IsOwner:   d.OwnerID == userID,
-			RoleName:  d.RoleName,
-			RoleCode:  d.RoleCode,
-		})
-	}
-
-	return companies, nil
 }
 
 // containsRole checks if a role exists in the roles slice
@@ -842,13 +498,12 @@ func containsRole(roles []string, target string) bool {
 //  3. Not found → look up core.users by email.
 //     - Found → link the Google identity to the existing account,
 //       then sign that user in. The pre-existing user keeps their
-//       company/role/branch setup — no auto-provisioning here.
+//       roles — no auto-provisioning here.
 //  4. Not found at all → first-time Google user:
-//       a) create a new core.users row (no password)
-//       b) provision a client, company (named after the Google
-//          profile), default branch — same flow as SignUp
-//       c) link the Google identity
-//       d) sign the new user in
+//       a) create a new core.users row (no password, no role —
+//          same as SignUp)
+//       b) link the Google identity
+//       c) sign the new user in
 //
 // All four branches return a *dto.GoogleSignInResponse with
 // `is_new_user` distinguishing case (4) from the rest. Token issuance
@@ -940,38 +595,22 @@ func (s *AuthService) SignInWithGoogle(
 	// Update last_login_at on the user row (mirrors SignIn).
 	_ = s.userRepo.UpdateLastLogin(ctx, user.ID)
 
-	// From here on the response build mirrors SignIn: load primary
-	// company, roles, permissions; issue JWT + refresh token.
+	// From here on the response build mirrors SignIn: load roles,
+	// permissions; issue JWT + refresh token.
 	return s.issueGoogleTokens(ctx, user, isNewUser, deviceInfo, ipAddress)
 }
 
-// provisionGoogleUser creates the user + client + company + default
-// branch atomically-ish (sequential inserts; matches the existing
-// SignUp flow which is also non-transactional today). The company name
-// is forced to the Google profile name as requested by the product:
-// no onboarding form needed.
+// provisionGoogleUser creates the user row and links the Google
+// identity. Like SignUp, no role is assigned.
 func (s *AuthService) provisionGoogleUser(
 	ctx context.Context,
 	tok *pkgfirebase.VerifiedToken,
 	email string,
 ) (*userDomain.User, error) {
-	if s.clientService == nil {
-		return nil, errors.New("client service not set")
-	}
-	if s.companyRepo == nil {
-		return nil, errors.New("company repository not set")
-	}
-	if s.companyUserRepo == nil {
-		return nil, errors.New("company user repository not set")
-	}
-	if s.branchRepo == nil {
-		return nil, errors.New("branch repository not set")
-	}
-
 	now := time.Now()
 
 	// Username: derived from email local-part. Collisions resolved by
-	// appending a 4-hex suffix (mirrors client.allocateSlug's spirit).
+	// appending a 4-hex suffix.
 	username, err := s.allocateUsernameFromEmail(ctx, email)
 	if err != nil {
 		return nil, err
@@ -1015,89 +654,15 @@ func (s *AuthService) provisionGoogleUser(
 		return nil, err
 	}
 
-	// Client (registration-level tenant) — one per registrant.
-	newClient, err := s.clientService.CreateForUser(ctx, user.ID, user.Username, displayName)
-	if err != nil {
-		logger.Error("Failed to create client during google signup", logger.Err(err))
-		return nil, err
-	}
-
-	// Company — name follows the Google display name verbatim, as
-	// requested by product. Truncate to the column's 255-char limit
-	// defensively (Google profile names are usually short).
-	companyName := truncateName(displayName, 255)
-	companyID := uuid.New().String()
-	newCompany := &companyDomain.Company{
-		ID:        companyID,
-		ClientID:  newClient.ID,
-		Name:      companyName,
-		Type:      companyDomain.CompanyTypeHolding,
-		OwnerID:   user.ID,
-		Sort:      1,
-		IsActive:  true,
-		CreatedAt: now,
-		CreatedBy: &user.ID,
-		UpdatedAt: now,
-		UpdatedBy: &user.ID,
-	}
-	if err := s.companyRepo.Create(ctx, newCompany); err != nil {
-		logger.Error("Failed to create company during google signup", logger.Err(err))
-		return nil, err
-	}
-
-	// Link user → company as primary admin.
-	var defaultRoleID *string
-	if s.config != nil && s.config.Auth.DefaultAdminRoleID != "" {
-		id := s.config.Auth.DefaultAdminRoleID
-		defaultRoleID = &id
-	}
-	companyUser := &companyDomain.CompanyUser{
-		ID:        uuid.New().String(),
-		CompanyID: companyID,
-		UserID:    user.ID,
-		RoleID:    defaultRoleID,
-		IsPrimary: true,
-		IsActive:  true,
-		JoinedAt:  now,
-		CreatedAt: now,
-		CreatedBy: &user.ID,
-		UpdatedAt: now,
-		UpdatedBy: &user.ID,
-	}
-	if err := s.companyUserRepo.Create(ctx, companyUser); err != nil {
-		logger.Error("Failed to link user to company during google signup", logger.Err(err))
-		return nil, err
-	}
-
-	// Default branch — same "Cabang Pusat" as email signup.
-	defaultBranch := &branchDomain.Branch{
-		ID:        uuid.New().String(),
-		CompanyID: companyID,
-		Name:      "Cabang Pusat",
-		Sort:      1,
-		IsDefault: true,
-		IsActive:  true,
-		CreatedAt: now,
-		CreatedBy: &user.ID,
-		UpdatedAt: now,
-		UpdatedBy: &user.ID,
-	}
-	if err := s.branchRepo.Create(ctx, defaultBranch); err != nil {
-		logger.Error("Failed to create default branch during google signup", logger.Err(err))
-		return nil, err
-	}
-
-	// Link the Google identity last so a failure in earlier provisioning
-	// doesn't leave an orphan identity row.
+	// Link the Google identity after the user row exists so a failed
+	// insert doesn't leave an orphan identity row.
 	if err := s.linkGoogleIdentity(ctx, user.ID, tok, email); err != nil {
 		return nil, err
 	}
 
 	logger.Info("User provisioned via Google sign-in",
 		logger.String("user_id", user.ID),
-		logger.String("email", user.Email),
-		logger.String("company_id", companyID),
-		logger.String("company_name", companyName))
+		logger.String("email", user.Email))
 
 	return user, nil
 }
@@ -1131,8 +696,8 @@ func (s *AuthService) linkGoogleIdentity(
 	return nil
 }
 
-// issueGoogleTokens packages the response: loads primary company,
-// roles, permissions; mints access + refresh tokens; persists refresh.
+// issueGoogleTokens packages the response: loads roles, permissions;
+// mints access + refresh tokens; persists refresh.
 // Logic mirrors the tail of SignIn — kept separate so the Google flow
 // can attach `is_new_user`.
 func (s *AuthService) issueGoogleTokens(
@@ -1142,37 +707,10 @@ func (s *AuthService) issueGoogleTokens(
 	deviceInfo domain.DeviceInfo,
 	ipAddress string,
 ) (*dto.GoogleSignInResponse, error) {
-	var (
-		companyID, companyName string
-		companyInfo            *dto.CompanyInfo
-		clientID, clientSlug   string
-		clientInfo             *dto.ClientInfo
-	)
-
-	if s.companyUserRepo != nil {
-		primaryMembership, _ := s.companyUserRepo.GetPrimaryCompany(ctx, user.ID)
-		if primaryMembership != nil {
-			companyID = primaryMembership.CompanyID
-			if s.companyRepo != nil {
-				company, _ := s.companyRepo.FindByID(ctx, companyID)
-				if company != nil {
-					companyName = company.Name
-					companyInfo = &dto.CompanyInfo{ID: company.ID, Name: company.Name}
-					clientID, clientSlug, clientInfo = s.resolveClientInfo(ctx, company.ClientID)
-				}
-			}
-		}
-	}
-
 	var roles, permissions []string
 	if s.roleRepo != nil {
-		if companyID != "" {
-			roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID, &companyID)
-			permissions, _ = s.roleRepo.GetUserPermissions(ctx, user.ID, &companyID)
-		} else {
-			roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID, nil)
-			permissions, _ = s.roleRepo.GetUserPermissions(ctx, user.ID, nil)
-		}
+		roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID)
+		permissions, _ = s.roleRepo.GetUserPermissions(ctx, user.ID)
 	}
 
 	fullName := ""
@@ -1181,8 +719,7 @@ func (s *AuthService) issueGoogleTokens(
 	}
 	isSuperAdmin := containsRole(roles, jwt.RoleSuperAdmin)
 	accessToken, err := jwt.GenerateToken(
-		user.ID, companyID, companyName, clientID, clientSlug,
-		user.Email, user.Username, fullName, isSuperAdmin, roles,
+		user.ID, user.Email, user.Username, fullName, isSuperAdmin, roles,
 	)
 	if err != nil {
 		logger.Error("Failed to generate access token", logger.Err(err))
@@ -1228,8 +765,6 @@ func (s *AuthService) issueGoogleTokens(
 			Username: user.Username,
 			FullName: user.FullName,
 		},
-		Company:     companyInfo,
-		Client:      clientInfo,
 		Roles:       roles,
 		Permissions: permissions,
 	}, nil
@@ -1316,16 +851,6 @@ func shortHex(n int) string {
 // cryptoRand is wrapped behind a var so a test can swap it out.
 var cryptoRand = func(b []byte) (int, error) {
 	return cryptorand.Read(b)
-}
-
-// truncateName clamps a string to maxRunes UTF-8 runes (not bytes), so
-// multibyte characters in a Google display name don't get split mid-codepoint.
-func truncateName(s string, maxRunes int) string {
-	r := []rune(s)
-	if len(r) <= maxRunes {
-		return s
-	}
-	return string(r[:maxRunes])
 }
 
 // marshalProfile serializes a verified token's claims for storage in

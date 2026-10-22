@@ -33,17 +33,6 @@ func (qb *QueryBuilder) AddSoftDeleteFilter() *QueryBuilder {
 	return qb
 }
 
-// AddCompanyFilter adds company_id filter
-func (qb *QueryBuilder) AddCompanyFilter(companyID string) *QueryBuilder {
-	if companyID == "" {
-		return qb
-	}
-	qb.whereConditions = append(qb.whereConditions, fmt.Sprintf("company_id = $%d", qb.argPos))
-	qb.args = append(qb.args, companyID)
-	qb.argPos++
-	return qb
-}
-
 // AddFilter adds a generic filter with field, operator, and value
 func (qb *QueryBuilder) AddFilter(field string, operator string, value interface{}) *QueryBuilder {
 	qb.whereConditions = append(qb.whereConditions, fmt.Sprintf("%s %s $%d", field, operator, qb.argPos))

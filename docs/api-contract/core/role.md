@@ -3,7 +3,7 @@
 **Version:** v1
 **Base URL:** `/core/v1/roles`
 **Module:** Core Role Management
-**Last Updated:** 2026-04-05
+**Last Updated:** 2026-10-21
 
 ---
 
@@ -13,7 +13,7 @@ API untuk mengelola roles dengan **level-based permissions**. Permissions disimp
 
 **Key Features:**
 - Level-based permissions: `viewer`, `editor`, `admin`
-- Global roles (system-wide) dan company-specific roles
+- Semua role bersifat global (system-wide) — tidak ada role per-company
 - System roles tidak bisa dimodifikasi/dihapus
 - Soft delete
 
@@ -47,9 +47,6 @@ Permissions disimpan di database sebagai:
 |-------|------------|------------|
 | Core | `roles` | Kelola role |
 | | `user-management` | Kelola user |
-| | `branches` | Kelola cabang |
-| | `companies` | Kelola company |
-| | `company_users` | Kelola membership user di company |
 | Finance | `finance.chart_of_accounts` | Chart of accounts |
 | | `finance.bank_accounts` | Bank accounts |
 | Rental | `rental.customers` | Kelola customer |
@@ -59,7 +56,6 @@ Permissions disimpan di database sebagai:
 | | `rental.item_pricing` | Kelola pricing item |
 | | `rental.pricing_rules` | Kelola pricing rules |
 | | `rental.rental_payments` | Kelola pembayaran rental |
-| Audit | `audit-log` | Audit log |
 
 ### Cara Frontend Menggunakan
 
@@ -81,7 +77,7 @@ const canRead = permissions.includes("dashboard:read")
   "id": "660e8400-...",
   "code": "admin",
   "name": "Administrator",
-  "description": "Company administrator",
+  "description": "Custom administrator role",
   "permissions": {
     "dashboard": "admin",
     "user-management": "editor",
@@ -89,7 +85,6 @@ const canRead = permissions.includes("dashboard:read")
   },
   "is_system": false,
   "is_active": true,
-  "company_id": "880e8400-...",
   "created_by": "550e8400-...",
   "created_at": "2026-01-01T08:00:00Z",
   "updated_at": "2026-01-01T08:00:00Z"
@@ -99,13 +94,12 @@ const canRead = permissions.includes("dashboard:read")
 | Field | Type | Keterangan |
 |-------|------|------------|
 | `id` | UUID | ID role |
-| `code` | string | Kode unik (snake_case), tidak bisa diubah setelah dibuat |
+| `code` | string | Kode unik global di antara role yang belum dihapus (snake_case), tidak bisa diubah setelah dibuat |
 | `name` | string | Nama tampilan |
 | `description` | string / null | Deskripsi |
 | `permissions` | object | `{"resource": "level"}` — level: viewer/editor/admin |
 | `is_system` | boolean | Role sistem (tidak bisa diubah/dihapus) |
 | `is_active` | boolean | Status aktif |
-| `company_id` | UUID / null | `null` = global role, UUID = company-specific |
 | `created_by` | UUID / null | User yang membuat |
 | `created_at` | timestamp | Waktu dibuat |
 | `updated_at` | timestamp | Waktu terakhir diubah |
@@ -129,8 +123,8 @@ GET /core/v1/roles
 | `page` | int | 1 | Halaman |
 | `limit` | int | 10 | Max 100 |
 | `search` | string | - | Cari di code atau name |
-| `company_id` | UUID | - | Filter by company |
-| `include_global` | bool | true | Include global/system roles |
+
+> Caller non-super-admin tidak melihat role `super_admin` di list ini.
 
 **Response (200):**
 ```json
@@ -144,7 +138,6 @@ GET /core/v1/roles
       "permissions": {},
       "is_system": true,
       "is_active": true,
-      "company_id": null,
       "created_by": null,
       "created_at": "2026-01-01T08:00:00Z",
       "updated_at": "2026-01-01T08:00:00Z"
@@ -199,8 +192,7 @@ POST /core/v1/roles
     "jurnal-umum": "editor",
     "laporan-keuangan": "viewer"
   },
-  "is_active": true,
-  "company_id": "880e8400-..."
+  "is_active": true
 }
 ```
 
@@ -211,7 +203,8 @@ POST /core/v1/roles
 | `description` | string | Tidak | Max 1000 karakter |
 | `permissions` | object | Ya | `{"resource": "viewer/editor/admin"}` |
 | `is_active` | bool | Tidak | Default `true` |
-| `company_id` | UUID | Tidak | `null` untuk global role |
+
+> Role yang dibuat selalu global (tidak terikat company).
 
 **Response (201):** Role object yang baru dibuat.
 
@@ -221,7 +214,7 @@ POST /core/v1/roles
 |--------|---------|
 | 400 | Invalid request payload |
 | 400 | Invalid permissions format (level tidak valid) |
-| 409 | Role code already exists |
+| 409 | Role code already exists (code sudah dipakai role lain yang belum dihapus) |
 
 ---
 
@@ -320,23 +313,23 @@ DELETE /core/v1/roles/:id
 
 ---
 
-## System vs Company Roles
+## System vs Custom Roles
 
-| | System Role | Company Role |
+| | System Role | Custom Role |
 |-|-------------|--------------|
-| `company_id` | `null` | UUID |
 | `is_system` | `true` | `false` |
 | Bisa diubah? | Tidak | Ya |
 | Bisa dihapus? | Tidak | Ya |
-| Visibilitas | Semua company | Company tertentu saja |
+
+> Assignment role ke user (`core.user_roles`) juga global — tidak ada scope company. Assign/ganti role user lewat `role_id` di [user.md](user.md).
 
 ### Default System Roles
 
 | Code | Name | Permissions | Keterangan |
 |------|------|------------|------------|
-| `super_admin` | Super Administrator | `{}` (kosong) | Bypass semua permission checks via `IsSuperAdmin` flag di JWT. Tidak terikat company. |
-| `administrator` | Administrator | Semua resource = `admin`, audit-log = `viewer` | Default role saat user register. Akses di-scope ke company yang terelasi. Tidak bisa diubah kecuali oleh super_admin. |
+| `super_admin` | Super Administrator | `{}` (kosong) | Bypass semua permission checks via `IsSuperAdmin` flag di JWT. |
+| `administrator` | Administrator | Semua resource = `admin` | Di-assign secara eksplisit (signup tidak memberi role apa pun). Tidak bisa diubah kecuali oleh super_admin. |
 
 ---
 
-**Last Updated:** 2026-04-05
+**Last Updated:** 2026-10-21

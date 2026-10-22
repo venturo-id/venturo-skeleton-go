@@ -4,10 +4,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go/internal/middleware"
-	"venturo-skeleton-go/internal/modules/core/role/handler"
-	"venturo-skeleton-go/internal/modules/core/role/repository"
-	"venturo-skeleton-go/internal/modules/core/role/service"
+	"venturo-skeleton-go-simple/internal/middleware"
+	"venturo-skeleton-go-simple/internal/modules/core/role/handler"
+	"venturo-skeleton-go-simple/internal/modules/core/role/repository"
+	"venturo-skeleton-go-simple/internal/modules/core/role/service"
 )
 
 type RoleModule struct {

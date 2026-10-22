@@ -1,8 +1,8 @@
 # Tuai API Contract Documentation
 
-**Last Updated:** 2026-04-19
+**Last Updated:** 2026-10-21
 **Total Modules:** 3 (Core, Finance, Rental)
-**Total Endpoints Documented:** 135+
+**Total Endpoints Documented:** 126+
 
 ---
 
@@ -16,8 +16,7 @@ docs/api-contract/
 │   ├── user.md
 │   ├── role.md
 │   ├── permission.md (planned)
-│   ├── permission-template.md (planned)
-│   └── company.md (planned)
+│   └── permission-template.md (planned)
 ├── finance/
 │   ├── chart-of-accounts.md
 │   ├── journal-entries.md
@@ -52,9 +51,9 @@ Authentication, user management, and role-based access control.
 
 | File | Endpoints | Description | Status |
 |------|-----------|-------------|--------|
-| [auth.md](core/auth.md) | 14 | Authentication, email verification, password reset, company switching | ✅ Complete |
-| [user.md](core/user.md) | 10 | User CRUD, role assignment, password management | ✅ Complete |
-| [role.md](core/role.md) | 10 | Role CRUD, permission assignment, system vs company roles | ✅ Complete |
+| [auth.md](core/auth.md) | 7 | Sign up, sign in (password & Google), token refresh, logout, profile (`/me`) | ✅ Complete |
+| [user.md](core/user.md) | 8 | User CRUD, role assignment, password management | ✅ Complete |
+| [role.md](core/role.md) | 10 | Role CRUD, permission assignment (global roles) | ✅ Complete |
 
 ### 🚧 Planned Documentation
 
@@ -62,9 +61,8 @@ Authentication, user management, and role-based access control.
 |------|-----------|-------------|--------|
 | permission.md | 15 | Permission & Module management, CRUD templates | 🚧 Planned |
 | permission-template.md | 6 | Permission template management | 🚧 Planned |
-| company.md | 9 | Company CRUD, user management | 🚧 Planned |
 
-**Core Module Total:** 34 endpoints documented, 30 planned
+**Core Module Total:** 25 endpoints documented, 21 planned
 
 ---
 
@@ -164,16 +162,6 @@ Content-Type: application/json
 
 ---
 
-## 🏢 Multi-Tenancy
-
-All endpoints are company-aware:
-
-- JWT token contains `company_id` claim
-- All data is automatically filtered by company
-- Users can switch companies via `POST /core/v1/auth/switch-company`
-
----
-
 ## 🎭 Permission System
 
 Permissions follow the format: `{module}.{resource}:{action}`
@@ -253,7 +241,6 @@ Start with the [auth.md](core/auth.md) documentation to:
 - Register a new account
 - Verify email
 - Sign in and get access token
-- Understand company switching
 
 ### 2. User & Role Management
 Use [user.md](core/user.md) and [role.md](core/role.md) to:
@@ -334,6 +321,13 @@ For questions or issues:
 
 ## 📋 Changelog
 
+### Version 1.5 (2026-10-21)
+- Removed Tenancy domain (clients, companies, company_users, branches, user_branches), Approval system, and translation overrides
+- Removed endpoints: `POST /core/v1/auth/switch-company`, `GET /core/v1/auth/companies`, and all `/companies*`, `/branches*`, `/clients*`, `/admin/clients/*`, `/approval-configs*`, `/approval-requests*`, `/translation-overrides*` routes
+- Deleted docs: `approval.md`, `branch.md`, `clients.md`, `company.md`, `translation-overrides.md`
+- Updated auth contract: no `company`/`client` in responses, no company/client claims in JWT, `company_name` removed from signup, new users get no role
+- Total: 126 endpoints documented
+
 ### Version 1.4 (2026-04-19)
 - Added A3 Operating Fund Curia module (`finance.a3_operating_fund_curia`): 11 endpoints. Two-year comparison budget with 4 nested sub-blocks per year (operating income, operating expenses, other information, development office) stored as two JSONB columns + top-level FTE scalars
 - Updated Approval system contract: added `a3_budget` feature key mapping to `finance.a3_operating_fund_curia`
@@ -368,7 +362,7 @@ For questions or issues:
 ## 🎯 Roadmap
 
 ### Short Term
-- [ ] Complete Core module documentation (permission, permission-template, company)
+- [ ] Complete Core module documentation (permission, permission-template)
 - [ ] Complete Finance transactional modules (invoices, payments, expenses)
 
 ### Medium Term
@@ -383,6 +377,6 @@ For questions or issues:
 
 ---
 
-**Document Version:** 1.1
-**Last Updated:** 2026-03-22
+**Document Version:** 1.5
+**Last Updated:** 2026-10-21
 **Maintained By:** Tuai Development Team

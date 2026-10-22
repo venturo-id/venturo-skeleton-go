@@ -11,7 +11,6 @@ type Config struct {
 	Database DatabaseConfig
 	Server   ServerConfig
 	Security SecurityConfig
-	Auth     AuthConfig
 	WAHA     WAHAConfig
 	OpenAI   OpenAIConfig
 	Redis    RedisConfig
@@ -59,12 +58,6 @@ type SecurityConfig struct {
 	AccountLockoutDuration    time.Duration
 }
 
-type AuthConfig struct {
-	// DefaultAdminRoleID is the role assigned to a newly registered user
-	// in their freshly created company. Maps to core.roles.id.
-	DefaultAdminRoleID string
-}
-
 type WAHAConfig struct {
 	BaseURL       string
 	APIKey        string
@@ -108,9 +101,6 @@ func Load() *Config {
 			EmailVerificationRequired: getEnvBool("EMAIL_VERIFICATION_REQUIRED", true),
 			MaxLoginAttempts:          getEnvInt("MAX_LOGIN_ATTEMPTS", 5),
 			AccountLockoutDuration:    getEnvDuration("ACCOUNT_LOCKOUT_DURATION", 30*time.Minute),
-		},
-		Auth: AuthConfig{
-			DefaultAdminRoleID: getEnv("AUTH_DEFAULT_ADMIN_ROLE_ID", "00000000-0000-0000-0000-000000000002"),
 		},
 		WAHA: WAHAConfig{
 			BaseURL:       getEnv("WAHA_BASE_URL", "https://wapi.venturo.id"),

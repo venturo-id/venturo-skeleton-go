@@ -6,10 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"venturo-skeleton-go/internal/middleware"
-	"venturo-skeleton-go/internal/modules/core/auth/dto"
-	"venturo-skeleton-go/internal/modules/core/auth/service"
-	"venturo-skeleton-go/internal/shared/response"
+	"venturo-skeleton-go-simple/internal/middleware"
+	"venturo-skeleton-go-simple/internal/modules/core/auth/dto"
+	"venturo-skeleton-go-simple/internal/modules/core/auth/service"
+	"venturo-skeleton-go-simple/internal/shared/response"
 )
 
 type AuthHandler struct {
@@ -87,8 +87,7 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 //
 // Same response shape as SignIn, with one extra field:
 //   - is_new_user (bool): true if this request provisioned a brand-new
-//     user + client + company (auto-named from the Google profile);
-//     false if the user already existed (either had the identity linked
+//     user (with no role yet); false if the user already existed (either had the identity linked
 //     or had a local account with the same email that got auto-linked
 //     on this request).
 //
@@ -203,37 +202,11 @@ func (h *AuthHandler) LogoutAll(c *gin.Context) {
 	response.Success(c, http.StatusOK, "Logged out from all devices successfully", nil)
 }
 
-func (h *AuthHandler) SwitchCompany(c *gin.Context) {
-	var req dto.SwitchCompanyRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
-		return
-	}
-
-	userID := middleware.MustGetUserID(c)
-
-	ctx := c.Request.Context()
-	result, err := h.authService.SwitchCompany(ctx, userID, req.CompanyID)
-	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrCompanyNotFound):
-			response.Error(c, http.StatusNotFound, "Company not found", "")
-		case errors.Is(err, service.ErrNotCompanyMember):
-			response.Error(c, http.StatusForbidden, "You are not a member of this company", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to switch company", err.Error())
-		}
-		return
-	}
-
-	response.Success(c, http.StatusOK, "Company switched successfully", result)
-}
-
 func (h *AuthHandler) GetMe(c *gin.Context) {
 	claims := middleware.MustGetUserFromContext(c)
 
 	ctx := c.Request.Context()
-	result, err := h.authService.GetMe(ctx, claims.UserID, claims.CompanyID, claims.IsSuperAdmin)
+	result, err := h.authService.GetMe(ctx, claims.UserID, claims.IsSuperAdmin)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrUserNotActive):
@@ -245,17 +218,4 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	}
 
 	response.Success(c, http.StatusOK, "Profile retrieved successfully", result)
-}
-
-func (h *AuthHandler) GetMyCompanies(c *gin.Context) {
-	userID := middleware.MustGetUserID(c)
-
-	ctx := c.Request.Context()
-	companies, err := h.authService.GetMyCompanies(ctx, userID)
-	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get companies", err.Error())
-		return
-	}
-
-	response.Success(c, http.StatusOK, "Companies retrieved successfully", companies)
 }

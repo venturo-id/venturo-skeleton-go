@@ -91,7 +91,6 @@ type Role struct {
 	Permissions Permissions `json:"permissions"`
 	IsSystem    bool        `json:"is_system"`
 	IsActive    bool        `json:"is_active"`
-	CompanyID   *string     `json:"company_id,omitempty"`
 	CreatedAt   time.Time   `json:"created_at"`
 	CreatedBy   *string     `json:"created_by,omitempty"`
 	UpdatedAt   time.Time   `json:"updated_at"`
@@ -100,16 +99,10 @@ type Role struct {
 	DeletedBy   *string     `json:"deleted_by,omitempty"`
 }
 
-// IsGlobal returns true if the role is a global role (not company-specific)
-func (r *Role) IsGlobal() bool {
-	return r.CompanyID == nil
-}
-
 // UserRole represents a user-role assignment
 type UserRole struct {
 	UserID    string    `json:"user_id"`
 	RoleID    string    `json:"role_id"`
-	CompanyID *string   `json:"company_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	CreatedBy *string   `json:"created_by,omitempty"`
 }

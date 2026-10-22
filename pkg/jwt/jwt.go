@@ -78,19 +78,13 @@ func GetExpirationTime() time.Duration {
 }
 
 // GenerateToken generates a new JWT token with user claims.
-// clientID / clientSlug are the registration-level tenant identifiers —
-// callers pass them in so the FE can read its current client from the
-// JWT (useful for per-client features like translation overrides).
-// Both are optional: pre-company-switch tokens (refresh with no company
-// context) should pass "" for both.
 //
 // Note: the user's permission set is NOT embedded in the token. Keeping
 // it out lets the token stay small enough to survive every proxy in the
 // chain. The authz package (internal/shared/authz) handles runtime
 // permission lookup against Redis.
 func GenerateToken(
-	userID, companyID, companyName, clientID, clientSlug, email, username string,
-	fullName string,
+	userID, email, username, fullName string,
 	isSuperAdmin bool,
 	roles []string,
 ) (string, error) {
@@ -99,10 +93,6 @@ func GenerateToken(
 
 	claims := &Claims{
 		UserID:       userID,
-		CompanyID:    companyID,
-		CompanyName:  companyName,
-		ClientID:     clientID,
-		ClientSlug:   clientSlug,
 		Email:        email,
 		Username:     username,
 		FullName:     fullName,
@@ -179,10 +169,6 @@ func RefreshToken(oldTokenString string) (string, error) {
 	// next request, so there's nothing to carry across here.
 	return GenerateToken(
 		claims.UserID,
-		claims.CompanyID,
-		claims.CompanyName,
-		claims.ClientID,
-		claims.ClientSlug,
 		claims.Email,
 		claims.Username,
 		claims.FullName,

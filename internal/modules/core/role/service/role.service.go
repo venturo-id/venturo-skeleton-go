@@ -7,10 +7,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"venturo-skeleton-go/internal/modules/core/role/domain"
-	"venturo-skeleton-go/internal/modules/core/role/dto"
-	"venturo-skeleton-go/internal/modules/core/role/repository"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/internal/modules/core/role/domain"
+	"venturo-skeleton-go-simple/internal/modules/core/role/dto"
+	"venturo-skeleton-go-simple/internal/modules/core/role/repository"
+	"venturo-skeleton-go-simple/pkg/logger"
 )
 
 var (
@@ -122,7 +122,7 @@ func (s *RoleService) Create(ctx context.Context, req *dto.CreateRoleRequest, cr
 	}
 
 	// Check code uniqueness
-	exists, err := s.roleRepo.CodeExists(ctx, req.Code, req.CompanyID, nil)
+	exists, err := s.roleRepo.CodeExists(ctx, req.Code, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,6 @@ func (s *RoleService) Create(ctx context.Context, req *dto.CreateRoleRequest, cr
 		Permissions: domain.Permissions(req.Permissions),
 		IsSystem:    false,
 		IsActive:    isActive,
-		CompanyID:   req.CompanyID,
 		CreatedAt:   now,
 		CreatedBy:   &createdBy,
 		UpdatedAt:   now,
@@ -285,7 +284,7 @@ func (s *RoleService) AssignRoleToUser(ctx context.Context, req *dto.AssignRoleR
 		return ErrRoleNotFound
 	}
 
-	if err := s.roleRepo.AssignRoleToUser(ctx, req.UserID, req.RoleID, req.CompanyID, createdBy); err != nil {
+	if err := s.roleRepo.AssignRoleToUser(ctx, req.UserID, req.RoleID, createdBy); err != nil {
 		return err
 	}
 
@@ -296,7 +295,7 @@ func (s *RoleService) AssignRoleToUser(ctx context.Context, req *dto.AssignRoleR
 
 // RemoveRoleFromUser removes a role from a user
 func (s *RoleService) RemoveRoleFromUser(ctx context.Context, req *dto.RemoveRoleRequest) error {
-	if err := s.roleRepo.RemoveRoleFromUser(ctx, req.UserID, req.RoleID, req.CompanyID); err != nil {
+	if err := s.roleRepo.RemoveRoleFromUser(ctx, req.UserID, req.RoleID); err != nil {
 		return err
 	}
 	s.invalidateUser(ctx, req.UserID)
@@ -304,8 +303,8 @@ func (s *RoleService) RemoveRoleFromUser(ctx context.Context, req *dto.RemoveRol
 }
 
 // GetUserRoles gets all roles for a user
-func (s *RoleService) GetUserRoles(ctx context.Context, userID string, companyID *string) ([]dto.RoleResponse, error) {
-	roles, err := s.roleRepo.GetUserRoles(ctx, userID, companyID)
+func (s *RoleService) GetUserRoles(ctx context.Context, userID string) ([]dto.RoleResponse, error) {
+	roles, err := s.roleRepo.GetUserRoles(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -319,8 +318,8 @@ func (s *RoleService) GetUserRoles(ctx context.Context, userID string, companyID
 }
 
 // GetUserPermissions gets all permissions for a user (expanded to actions)
-func (s *RoleService) GetUserPermissions(ctx context.Context, userID string, companyID *string) ([]string, error) {
-	return s.roleRepo.GetUserPermissions(ctx, userID, companyID)
+func (s *RoleService) GetUserPermissions(ctx context.Context, userID string) ([]string, error) {
+	return s.roleRepo.GetUserPermissions(ctx, userID)
 }
 
 // validatePermissions validates the level-based permissions format
@@ -351,7 +350,6 @@ func (s *RoleService) toRoleResponse(role *domain.Role) dto.RoleResponse {
 		Permissions: map[string]string(role.Permissions),
 		IsSystem:    role.IsSystem,
 		IsActive:    role.IsActive,
-		CompanyID:   role.CompanyID,
 		CreatedBy:   role.CreatedBy,
 		CreatedAt:   role.CreatedAt,
 		UpdatedAt:   role.UpdatedAt,

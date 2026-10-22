@@ -1,0 +1,117 @@
+---
+title: Timebox BE — skema core (migrations 000001–000005)
+config:
+  layout: elk
+  theme: neutral
+  htmlLabels: false
+  themeVariables:
+    fontSize: 14px
+  elk:
+    mergeEdges: false
+    nodePlacementStrategy: NETWORK_SIMPLEX
+---
+%% Sumber ERD. Render ulang: lihat docs/erd/README.md
+%% Garis solid  (--) = FOREIGN KEY constraint di database
+%% Garis putus (..) = referensi logis tanpa FK (divalidasi di service layer)
+%% "audit standard_columns" = created_at, created_by, updated_at, updated_by, deleted_at, deleted_by (soft delete)
+erDiagram
+
+    %% ─── Identity & auth ───────────────────────────────────────
+    users {
+        uuid id PK
+        varchar(255) email UK "unik selama belum soft-delete"
+        varchar(100) username UK "unik selama belum soft-delete"
+        varchar(255) password_hash "NULL untuk user Google-only"
+        varchar(255) full_name
+        varchar(20) phone
+        varchar(500) avatar_url
+        bool is_active
+        bool is_email_verified
+        timestamptz email_verified_at
+        int failed_login_count
+        timestamptz locked_until
+        timestamptz last_login_at
+        audit standard_columns
+    }
+
+    refresh_tokens {
+        uuid id PK
+        uuid user_id FK
+        varchar(255) token_hash UK
+        jsonb device_info
+        varchar(45) ip_address
+        timestamptz expires_at
+        timestamptz revoked_at "diisi saat logout"
+        timestamptz last_used_at
+        timestamptz created_at
+    }
+
+    user_identities {
+        uuid id PK
+        uuid user_id FK
+        varchar(32) provider UK "google, apple, microsoft"
+        varchar(255) provider_user_id UK "Firebase UID; UK bersama provider"
+        varchar(255) email
+        jsonb raw_profile
+        timestamptz last_login_at
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    api_keys {
+        uuid id PK
+        uuid user_id FK
+        varchar(16) key_id UK
+        varchar(64) secret_hash UK "SHA256"
+        varchar(50) key_prefix
+        varchar(100) name
+        text description
+        api_key_environment environment "enum: live, test"
+        jsonb scoped_permissions "kosong = warisi semua"
+        text[] ip_whitelist "NULL = semua IP"
+        int rate_limit
+        int rate_limit_window "detik"
+        timestamptz expires_at
+        timestamptz revoked_at
+        uuid revoked_by FK
+        text revoke_reason
+        timestamptz last_used_at
+        varchar(45) last_used_ip
+        bigint total_requests
+        audit standard_columns
+    }
+
+    %% ─── RBAC ──────────────────────────────────────────────────
+    roles {
+        uuid id PK
+        varchar(50) code UK "unik selama belum soft-delete"
+        varchar(100) name
+        text description
+        jsonb permissions "resource ke viewer, editor, admin"
+        bool is_system "tidak bisa diubah"
+        bool is_active
+        audit standard_columns
+    }
+
+    user_roles {
+        uuid user_id PK, FK
+        uuid role_id PK, FK
+        timestamptz created_at
+        uuid created_by
+    }
+
+    %% ─── Relasi: FK constraint ─────────────────────────────────
+    users            ||--o{ refresh_tokens          : "user_id"
+    users            ||--o{ user_identities         : "user_id"
+    users            ||--o{ api_keys                : "user_id"
+    users            |o--o{ api_keys                : "revoked_by"
+
+    users            ||--o{ user_roles              : "user_id"
+    roles            ||--o{ user_roles              : "role_id"
+
+    %% ─── Warna per domain ──────────────────────────────────────
+    classDef identity fill:#dbeafe,stroke:#1d4ed8
+    classDef rbac     fill:#ffedd5,stroke:#c2410c
+
+    class users,refresh_tokens,user_identities,api_keys identity
+    class roles,user_roles rbac

@@ -4,10 +4,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go/internal/middleware"
-	"venturo-skeleton-go/internal/modules/core/user/handler"
-	"venturo-skeleton-go/internal/modules/core/user/repository"
-	"venturo-skeleton-go/internal/modules/core/user/service"
+	"venturo-skeleton-go-simple/internal/middleware"
+	"venturo-skeleton-go-simple/internal/modules/core/user/handler"
+	"venturo-skeleton-go-simple/internal/modules/core/user/repository"
+	"venturo-skeleton-go-simple/internal/modules/core/user/service"
 )
 
 type UserModule struct {
@@ -38,8 +38,8 @@ func (m *UserModule) SetupRoutes(router *gin.RouterGroup) {
 		users.PUT("/me/password", m.Handler.ChangePassword)
 
 		// User management endpoints
-		users.GET("", m.Handler.GetAll)
-		users.GET("/:id", m.Handler.GetByID)
+		users.GET("", middleware.RequirePermission("user-management:read"), m.Handler.GetAll)
+		users.GET("/:id", middleware.RequirePermission("user-management:read"), m.Handler.GetByID)
 		users.POST("", middleware.RequirePermission("user-management:create"), m.Handler.Create)
 		users.PUT("/:id", middleware.RequirePermission("user-management:update"), m.Handler.Update)
 		users.DELETE("/:id", middleware.RequirePermission("user-management:delete"), m.Handler.Delete)

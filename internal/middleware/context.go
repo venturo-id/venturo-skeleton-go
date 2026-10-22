@@ -3,7 +3,7 @@ package middleware
 import (
 	"errors"
 
-	jwtpkg "venturo-skeleton-go/pkg/jwt"
+	jwtpkg "venturo-skeleton-go-simple/pkg/jwt"
 
 	"github.com/gin-gonic/gin"
 )
@@ -76,15 +76,6 @@ func GetUserRoles(c *gin.Context) ([]string, error) {
 		return nil, err
 	}
 	return claims.Roles, nil
-}
-
-// GetCompanyID retrieves company ID from context
-func GetCompanyID(c *gin.Context) string {
-	claims, err := GetUserFromContext(c)
-	if err != nil {
-		return ""
-	}
-	return claims.CompanyID
 }
 
 // MustGetUserID retrieves user ID from context and panics if not found

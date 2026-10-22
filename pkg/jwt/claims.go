@@ -19,10 +19,6 @@ const RoleSuperAdmin = "super_admin"
 // and middleware.RequireRole checks them synchronously with no cache.
 type Claims struct {
 	UserID       string   `json:"user_id"`
-	CompanyID    string   `json:"company_id"`   // Primary company ID for multi-tenancy
-	CompanyName  string   `json:"company_name"` // Company name for display purposes
-	ClientID     string   `json:"client_id"`    // Registration-level tenant ID (parent of company)
-	ClientSlug   string   `json:"client_slug"`  // DNS-safe client identifier — used by FE to call public translation bootstrap
 	Email        string   `json:"email"`
 	Username     string   `json:"username"`
 	FullName     string   `json:"full_name"`

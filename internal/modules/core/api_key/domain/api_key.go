@@ -18,7 +18,6 @@ const (
 type ApiKey struct {
 	ID                string            `json:"id"`
 	UserID            string            `json:"user_id"`
-	CompanyID         string            `json:"company_id"`
 	KeyID             string            `json:"key_id"`
 	SecretHash        string            `json:"-"` // Never expose in JSON
 	KeyPrefix         string            `json:"key_prefix"`

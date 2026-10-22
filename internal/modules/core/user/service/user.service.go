@@ -8,68 +8,45 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	branchDomain "venturo-skeleton-go/internal/modules/core/branch/domain"
-	companyDomain "venturo-skeleton-go/internal/modules/core/company/domain"
-	companyDto "venturo-skeleton-go/internal/modules/core/company/dto"
-	companyService "venturo-skeleton-go/internal/modules/core/company/service"
-	roleDomain "venturo-skeleton-go/internal/modules/core/role/domain"
-	"venturo-skeleton-go/internal/modules/core/user/domain"
-	"venturo-skeleton-go/internal/modules/core/user/dto"
-	"venturo-skeleton-go/internal/modules/core/user/repository"
-	"venturo-skeleton-go/pkg/crypto"
-	jwtpkg "venturo-skeleton-go/pkg/jwt"
-	"venturo-skeleton-go/pkg/logger"
+	roleDomain "venturo-skeleton-go-simple/internal/modules/core/role/domain"
+	"venturo-skeleton-go-simple/internal/modules/core/user/domain"
+	"venturo-skeleton-go-simple/internal/modules/core/user/dto"
+	"venturo-skeleton-go-simple/internal/modules/core/user/repository"
+	"venturo-skeleton-go-simple/pkg/crypto"
+	jwtpkg "venturo-skeleton-go-simple/pkg/jwt"
+	"venturo-skeleton-go-simple/pkg/logger"
 )
 
 var (
-	ErrUserNotFound          = errors.New("user not found")
-	ErrEmailAlreadyExists    = errors.New("email already exists")
-	ErrUsernameAlreadyExists = errors.New("username already exists")
-	ErrInvalidPassword       = errors.New("invalid password")
-	ErrRoleNotAllowed        = errors.New("role is not allowed for caller")
-	ErrCompaniesRequired     = errors.New("user must be assigned to at least one company")
-
-	// ErrCompanyNotFound is re-exported so handlers can map the error
-	// returned by AssignUserToCompaniesTx / SyncUserCompanies without
-	// importing the company service package directly.
-	ErrCompanyNotFound = companyService.ErrCompanyNotFound
+	ErrUserNotFound           = errors.New("user not found")
+	ErrEmailAlreadyExists     = errors.New("email already exists")
+	ErrUsernameAlreadyExists  = errors.New("username already exists")
+	ErrInvalidPassword        = errors.New("invalid password")
+	ErrRoleNotFound           = errors.New("role not found")
+	ErrRoleNotAllowed         = errors.New("role is not allowed for caller")
+	ErrCannotManageSuperAdmin = errors.New("only a super admin can manage a super admin user")
 )
 
-// TenantScope limits user visibility for non-super-admin callers. Pass nil to
-// bypass tenant filtering (super admin). See
-// UserRepository.FindAll / IsUserVisibleToScope for the exact visibility rules.
-type TenantScope struct {
-	CompanyID    string // anchor: caller's current company (root of the visible subtree)
-	CallerUserID string // used for the self-created fallback
-}
-
-// CompanySyncer syncs user-company memberships and retrieves company data (implemented by company service)
-type CompanySyncer interface {
-	SyncUserCompanies(ctx context.Context, userID string, req *companyDto.SyncUserCompaniesRequest, updatedBy string) error
-	AssignUserToCompaniesTx(ctx context.Context, tx pgx.Tx, userID string, req *companyDto.SyncUserCompaniesRequest, createdBy string) error
-	GetUserCompaniesWithDetails(ctx context.Context, userID string) ([]companyDomain.UserCompanyDetail, error)
-}
-
-// BranchSyncer syncs user-branch access and retrieves branch detail data
-// (implemented by branch/service.UserBranchService). Kept as a narrow
-// interface so the user service does not import the branch service package.
-type BranchSyncer interface {
-	SyncUserBranches(ctx context.Context, userID string, branchIDs []string, updatedBy string, scopeCompanyID *string) error
-	AssignUserToBranchesTx(ctx context.Context, tx pgx.Tx, userID string, branchIDs []string, createdBy string, scopeCompanyID *string) error
-	GetUserBranchesWithDetails(ctx context.Context, userID string) ([]branchDomain.UserBranchDetail, error)
-}
-
-// RoleLookup reads a role by ID. Kept as a narrow interface so the user
-// service does not pull in the full role service package.
+// RoleLookup reads roles and manages user role assignments (implemented by
+// role repository). Kept as a narrow interface so the user service does not
+// pull in the full role package.
 type RoleLookup interface {
 	FindByID(ctx context.Context, id string) (*roleDomain.Role, error)
+	GetUserRoles(ctx context.Context, userID string) ([]roleDomain.Role, error)
+	AssignRoleToUserTx(ctx context.Context, tx pgx.Tx, userID, roleID, createdBy string) error
+	ReplaceUserRoles(ctx context.Context, userID, roleID, createdBy string) error
+}
+
+// PermissionCacheInvalidator drops a user's cached permission set after
+// their role assignment changes. Implemented by *authz.Service.
+type PermissionCacheInvalidator interface {
+	InvalidateUser(ctx context.Context, userID string) error
 }
 
 type UserService struct {
-	userRepo      *repository.UserRepository
-	companySyncer CompanySyncer
-	branchSyncer  BranchSyncer
-	roleLookup    RoleLookup
+	userRepo    *repository.UserRepository
+	roleLookup  RoleLookup
+	invalidator PermissionCacheInvalidator // optional; nil is a no-op
 }
 
 func NewUserService(userRepo *repository.UserRepository) *UserService {
@@ -78,75 +55,79 @@ func NewUserService(userRepo *repository.UserRepository) *UserService {
 	}
 }
 
-// SetCompanySyncer sets the company syncer dependency (wired from router)
-func (s *UserService) SetCompanySyncer(syncer CompanySyncer) {
-	s.companySyncer = syncer
-}
-
-// SetBranchSyncer sets the branch access syncer dependency (wired from router)
-func (s *UserService) SetBranchSyncer(syncer BranchSyncer) {
-	s.branchSyncer = syncer
-}
-
 // SetRoleLookup sets the role lookup dependency (wired from router). Required
-// when tenant scope enforcement needs to validate role_id against caller's
-// scope — see validateRoleForScope.
+// whenever a request carries role_id.
 func (s *UserService) SetRoleLookup(lookup RoleLookup) {
 	s.roleLookup = lookup
 }
 
-// validateRoleForScope ensures a non-super-admin caller can only assign a
-// role that is either (a) owned by their current company, or (b) a global
-// system role that is NOT super_admin. Pass scope == nil to bypass (super
-// admin). Nil roleID is allowed — it means "no role" and is always valid.
-func (s *UserService) validateRoleForScope(ctx context.Context, roleID *string, scope *TenantScope) error {
-	if roleID == nil || scope == nil {
+// SetPermissionCacheInvalidator wires the Redis-backed authz cache so role
+// changes made through this service take effect on the next request.
+func (s *UserService) SetPermissionCacheInvalidator(inv PermissionCacheInvalidator) {
+	s.invalidator = inv
+}
+
+// invalidateUser is a nil-safe wrapper — a failed invalidation shouldn't
+// fail the write that triggered it; TTL will eventually heal the cache.
+func (s *UserService) invalidateUser(ctx context.Context, userID string) {
+	if s.invalidator == nil {
+		return
+	}
+	if err := s.invalidator.InvalidateUser(ctx, userID); err != nil {
+		logger.Warn("authz cache invalidation failed",
+			logger.String("user_id", userID),
+			logger.Err(err))
+	}
+}
+
+// validateRole ensures roleID points to an existing role and that a
+// non-super-admin caller is not handing out the super_admin role. Nil roleID
+// is allowed — it means "no role change".
+func (s *UserService) validateRole(ctx context.Context, roleID *string, callerIsSuperAdmin bool) error {
+	if roleID == nil {
 		return nil
 	}
 	if s.roleLookup == nil {
-		// Fail closed: if the dependency was not wired, refuse to allow a
-		// non-super-admin caller to pin an unverified role onto a user.
-		return ErrRoleNotAllowed
+		return errors.New("role lookup not configured")
 	}
 	role, err := s.roleLookup.FindByID(ctx, *roleID)
 	if err != nil {
 		return err
 	}
 	if role == nil {
-		return ErrRoleNotAllowed
+		return ErrRoleNotFound
 	}
-	// Global roles: allowed except super_admin.
-	if role.CompanyID == nil {
-		if role.Code == jwtpkg.RoleSuperAdmin {
-			return ErrRoleNotAllowed
-		}
-		return nil
-	}
-	// Tenant-owned role: must match caller's current company exactly.
-	if *role.CompanyID != scope.CompanyID {
+	if role.Code == jwtpkg.RoleSuperAdmin && !callerIsSuperAdmin {
 		return ErrRoleNotAllowed
 	}
 	return nil
 }
 
-// GetAll returns paginated list of users. If scope is non-nil, tenant
-// visibility filters are applied; pass nil for super-admin callers.
-func (s *UserService) GetAll(ctx context.Context, params *dto.UserQueryParams, scope *TenantScope) (*dto.UserListResponse, error) {
+// guardSuperAdminTarget stops a non-super-admin caller from modifying or
+// deleting a user who holds the super_admin role.
+func (s *UserService) guardSuperAdminTarget(ctx context.Context, userID string, callerIsSuperAdmin bool) error {
+	if callerIsSuperAdmin || s.roleLookup == nil {
+		return nil
+	}
+	roles, err := s.roleLookup.GetUserRoles(ctx, userID)
+	if err != nil {
+		return err
+	}
+	for _, r := range roles {
+		if r.Code == jwtpkg.RoleSuperAdmin {
+			return ErrCannotManageSuperAdmin
+		}
+	}
+	return nil
+}
+
+// GetAll returns paginated list of users
+func (s *UserService) GetAll(ctx context.Context, params *dto.UserQueryParams) (*dto.UserListResponse, error) {
 	if params.Page == 0 {
 		params.Page = 1
 	}
 	if params.Limit == 0 {
 		params.Limit = 10
-	}
-
-	if scope != nil {
-		companyID := scope.CompanyID
-		callerID := scope.CallerUserID
-		params.ScopeCompanyID = &companyID
-		params.ScopeCreatedBy = &callerID
-	} else {
-		params.ScopeCompanyID = nil
-		params.ScopeCreatedBy = nil
 	}
 
 	users, total, err := s.userRepo.FindAll(ctx, params)
@@ -157,7 +138,7 @@ func (s *UserService) GetAll(ctx context.Context, params *dto.UserQueryParams, s
 	userResponses := make([]dto.UserResponse, len(users))
 	for i, user := range users {
 		resp := s.toUserResponse(&user)
-		s.enrichWithCompanyData(ctx, &resp, user.ID)
+		s.enrichWithRole(ctx, &resp, user.ID)
 		userResponses[i] = resp
 	}
 
@@ -169,21 +150,8 @@ func (s *UserService) GetAll(ctx context.Context, params *dto.UserQueryParams, s
 	}, nil
 }
 
-// GetByID returns a user by ID. If scope is non-nil, the target user must be
-// visible to the caller's tenant scope; otherwise ErrUserNotFound is returned
-// (we deliberately do NOT return a 403 — leaking the existence of users in
-// other tenants would itself be a minor info-disclosure).
-func (s *UserService) GetByID(ctx context.Context, id string, scope *TenantScope) (*dto.UserResponse, error) {
-	if scope != nil {
-		visible, err := s.userRepo.IsUserVisibleToScope(ctx, id, scope.CompanyID, scope.CallerUserID)
-		if err != nil {
-			return nil, err
-		}
-		if !visible {
-			return nil, ErrUserNotFound
-		}
-	}
-
+// GetByID returns a user by ID
+func (s *UserService) GetByID(ctx context.Context, id string) (*dto.UserResponse, error) {
 	user, err := s.userRepo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -193,29 +161,15 @@ func (s *UserService) GetByID(ctx context.Context, id string, scope *TenantScope
 	}
 
 	response := s.toUserResponse(user)
-	s.enrichWithCompanyData(ctx, &response, user.ID)
+	s.enrichWithRole(ctx, &response, user.ID)
 	return &response, nil
 }
 
-// Create creates a new user. The insert into core.users AND the assignment
-// into core.company_users run inside a single transaction so the flow is
-// atomic: if membership assignment fails, the user row is rolled back and
-// the caller receives a real error (previously the error was silently
-// swallowed and a user could end up with zero memberships — "orphan").
-//
-// When scope is non-nil (non-super-admin caller), role_id is validated to
-// ensure the caller cannot pin a role they have no authority over (e.g. a
-// role belonging to another tenant, or the global super_admin role).
-func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest, createdBy string, scope *TenantScope) (*dto.UserResponse, error) {
-	// Policy: every user must belong to at least one company. The handler
-	// already injects the caller's current company for non-super-admin, so
-	// in practice this only fires for super_admin callers who forgot to
-	// pass company_ids in the body.
-	if len(req.CompanyIDs) == 0 {
-		return nil, ErrCompaniesRequired
-	}
-
-	if err := s.validateRoleForScope(ctx, req.RoleID, scope); err != nil {
+// Create creates a new user. The insert into core.users AND the role
+// assignment into core.user_roles run inside a single transaction so a
+// failed assignment rolls the user row back.
+func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest, createdBy string, callerIsSuperAdmin bool) (*dto.UserResponse, error) {
+	if err := s.validateRole(ctx, req.RoleID, callerIsSuperAdmin); err != nil {
 		return nil, err
 	}
 
@@ -272,34 +226,8 @@ func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest, cr
 		return nil, err
 	}
 
-	// Assign company memberships in the SAME transaction so user + memberships
-	// commit or roll back together.
-	if len(req.CompanyIDs) > 0 {
-		if s.companySyncer == nil {
-			return nil, errors.New("company syncer not configured")
-		}
-		syncReq := &companyDto.SyncUserCompaniesRequest{
-			CompanyIDs: req.CompanyIDs,
-			RoleID:     req.RoleID,
-		}
-		if err := s.companySyncer.AssignUserToCompaniesTx(ctx, tx, user.ID, syncReq, createdBy); err != nil {
-			return nil, err
-		}
-	}
-
-	// Assign branch access in the same transaction. Branch validation enforces
-	// that every branch exists and (for non-super-admin) belongs to the
-	// caller's scope company — any violation rolls the user row back.
-	if len(req.BranchIDs) > 0 {
-		if s.branchSyncer == nil {
-			return nil, errors.New("branch syncer not configured")
-		}
-		var scopeCompanyID *string
-		if scope != nil {
-			c := scope.CompanyID
-			scopeCompanyID = &c
-		}
-		if err := s.branchSyncer.AssignUserToBranchesTx(ctx, tx, user.ID, req.BranchIDs, createdBy, scopeCompanyID); err != nil {
+	if req.RoleID != nil {
+		if err := s.roleLookup.AssignRoleToUserTx(ctx, tx, user.ID, *req.RoleID, createdBy); err != nil {
 			return nil, err
 		}
 	}
@@ -309,24 +237,14 @@ func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest, cr
 	}
 
 	response := s.toUserResponse(user)
+	s.enrichWithRole(ctx, &response, user.ID)
 	return &response, nil
 }
 
-// Update updates a user. If scope is non-nil, the target user must be
-// visible to the caller's tenant scope.
-func (s *UserService) Update(ctx context.Context, id string, req *dto.UpdateUserRequest, updatedBy string, scope *TenantScope) (*dto.UserResponse, error) {
-	if err := s.validateRoleForScope(ctx, req.RoleID, scope); err != nil {
+// Update updates a user. A non-nil req.RoleID replaces the user's roles.
+func (s *UserService) Update(ctx context.Context, id string, req *dto.UpdateUserRequest, updatedBy string, callerIsSuperAdmin bool) (*dto.UserResponse, error) {
+	if err := s.validateRole(ctx, req.RoleID, callerIsSuperAdmin); err != nil {
 		return nil, err
-	}
-
-	if scope != nil {
-		visible, err := s.userRepo.IsUserVisibleToScope(ctx, id, scope.CompanyID, scope.CallerUserID)
-		if err != nil {
-			return nil, err
-		}
-		if !visible {
-			return nil, ErrUserNotFound
-		}
 	}
 
 	user, err := s.userRepo.FindByID(ctx, id)
@@ -335,6 +253,10 @@ func (s *UserService) Update(ctx context.Context, id string, req *dto.UpdateUser
 	}
 	if user == nil {
 		return nil, ErrUserNotFound
+	}
+
+	if err := s.guardSuperAdminTarget(ctx, id, callerIsSuperAdmin); err != nil {
+		return nil, err
 	}
 
 	// Check email uniqueness if changed
@@ -382,49 +304,20 @@ func (s *UserService) Update(ctx context.Context, id string, req *dto.UpdateUser
 		return nil, err
 	}
 
-	// Sync company memberships if provided. Errors are now propagated so a
-	// partial failure is surfaced to the API caller instead of being silently
-	// dropped.
-	if req.CompanyIDs != nil && s.companySyncer != nil {
-		syncReq := &companyDto.SyncUserCompaniesRequest{
-			CompanyIDs: req.CompanyIDs,
-			RoleID:     req.RoleID,
-		}
-		if err := s.companySyncer.SyncUserCompanies(ctx, id, syncReq, updatedBy); err != nil {
+	if req.RoleID != nil {
+		if err := s.roleLookup.ReplaceUserRoles(ctx, id, *req.RoleID, updatedBy); err != nil {
 			return nil, err
 		}
-	}
-
-	// Sync branch access if provided. A non-nil pointer means "replace";
-	// a nil pointer means "don't touch branch assignments".
-	if req.BranchIDs != nil && s.branchSyncer != nil {
-		var scopeCompanyID *string
-		if scope != nil {
-			c := scope.CompanyID
-			scopeCompanyID = &c
-		}
-		if err := s.branchSyncer.SyncUserBranches(ctx, id, *req.BranchIDs, updatedBy, scopeCompanyID); err != nil {
-			return nil, err
-		}
+		s.invalidateUser(ctx, id)
 	}
 
 	response := s.toUserResponse(user)
+	s.enrichWithRole(ctx, &response, user.ID)
 	return &response, nil
 }
 
-// Delete soft deletes a user. If scope is non-nil, the target user must be
-// visible to the caller's tenant scope.
-func (s *UserService) Delete(ctx context.Context, id, deletedBy string, scope *TenantScope) error {
-	if scope != nil {
-		visible, err := s.userRepo.IsUserVisibleToScope(ctx, id, scope.CompanyID, scope.CallerUserID)
-		if err != nil {
-			return err
-		}
-		if !visible {
-			return ErrUserNotFound
-		}
-	}
-
+// Delete soft deletes a user
+func (s *UserService) Delete(ctx context.Context, id, deletedBy string, callerIsSuperAdmin bool) error {
 	user, err := s.userRepo.FindByID(ctx, id)
 	if err != nil {
 		return err
@@ -433,13 +326,20 @@ func (s *UserService) Delete(ctx context.Context, id, deletedBy string, scope *T
 		return ErrUserNotFound
 	}
 
-	return s.userRepo.SoftDelete(ctx, id, deletedBy)
+	if err := s.guardSuperAdminTarget(ctx, id, callerIsSuperAdmin); err != nil {
+		return err
+	}
+
+	if err := s.userRepo.SoftDelete(ctx, id, deletedBy); err != nil {
+		return err
+	}
+	s.invalidateUser(ctx, id)
+	return nil
 }
 
-// GetMe returns current user profile. Tenant scope is never applied — a user
-// can always see their own record regardless of company memberships.
+// GetMe returns current user profile
 func (s *UserService) GetMe(ctx context.Context, userID string) (*dto.UserResponse, error) {
-	return s.GetByID(ctx, userID, nil)
+	return s.GetByID(ctx, userID)
 }
 
 // UpdateMe updates current user profile
@@ -516,40 +416,17 @@ func (s *UserService) toUserResponse(user *domain.User) dto.UserResponse {
 	}
 }
 
-// enrichWithCompanyData adds company memberships, branch access, and role
-// name to user response. Failures in individual lookups are swallowed — the
-// base user data is still returned.
-func (s *UserService) enrichWithCompanyData(ctx context.Context, resp *dto.UserResponse, userID string) {
-	if s.companySyncer != nil {
-		if details, err := s.companySyncer.GetUserCompaniesWithDetails(ctx, userID); err == nil {
-			companies := make([]dto.UserCompanyItem, len(details))
-			for i, d := range details {
-				companies[i] = dto.UserCompanyItem{
-					CompanyID:   d.CompanyID,
-					CompanyName: d.CompanyName,
-					IsOwner:     d.OwnerID == userID,
-				}
-				// Use the first role name found as the user's role
-				if resp.RoleName == nil && d.RoleName != nil {
-					resp.RoleName = d.RoleName
-				}
-			}
-			resp.Companies = companies
-		}
+// enrichWithRole adds the user's role name to the response. A failed lookup
+// is swallowed — the base user data is still returned.
+func (s *UserService) enrichWithRole(ctx context.Context, resp *dto.UserResponse, userID string) {
+	if s.roleLookup == nil {
+		return
 	}
-
-	if s.branchSyncer != nil {
-		if details, err := s.branchSyncer.GetUserBranchesWithDetails(ctx, userID); err == nil {
-			branches := make([]dto.UserBranchItem, len(details))
-			for i, d := range details {
-				branches[i] = dto.UserBranchItem{
-					BranchID:   d.BranchID,
-					BranchCode: d.BranchCode,
-					BranchName: d.BranchName,
-					CompanyID:  d.CompanyID,
-				}
-			}
-			resp.Branches = branches
-		}
+	roles, err := s.roleLookup.GetUserRoles(ctx, userID)
+	if err != nil || len(roles) == 0 {
+		return
 	}
+	// Use the first assigned role as the user's role
+	name := roles[0].Name
+	resp.RoleName = &name
 }

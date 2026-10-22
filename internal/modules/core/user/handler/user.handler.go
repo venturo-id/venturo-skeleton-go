@@ -6,16 +6,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	branchService "venturo-skeleton-go/internal/modules/core/branch/service"
-	"venturo-skeleton-go/internal/middleware"
-	"venturo-skeleton-go/internal/modules/core/user/dto"
-	"venturo-skeleton-go/internal/modules/core/user/service"
-	"venturo-skeleton-go/internal/shared/response"
+	"venturo-skeleton-go-simple/internal/middleware"
+	"venturo-skeleton-go-simple/internal/modules/core/user/dto"
+	"venturo-skeleton-go-simple/internal/modules/core/user/service"
+	"venturo-skeleton-go-simple/internal/shared/response"
 )
 
 type UserHandler struct {
-	userService     *service.UserService
-	companyVerifier middleware.CompanyContextVerifier
+	userService *service.UserService
 }
 
 func NewUserHandler(userService *service.UserService) *UserHandler {
@@ -24,55 +22,12 @@ func NewUserHandler(userService *service.UserService) *UserHandler {
 	}
 }
 
-// SetCompanyVerifier wires the live company-membership verifier so that
-// resolveTenantScope can reject stale JWTs (caller no longer member of the
-// company in their JWT, or the company was soft-deleted/deactivated).
-func (h *UserHandler) SetCompanyVerifier(v middleware.CompanyContextVerifier) {
-	h.companyVerifier = v
-}
-
-// errStaleCompanyContext signals that the caller's JWT references a company
-// that is no longer valid (deleted/deactivated) or that the caller has lost
-// membership of. Mapped to 403 in handlers.
-var errStaleCompanyContext = errors.New("stale company context")
-
-// writeScopeError renders a 403 with an appropriate message based on which
-// failure mode resolveTenantScope returned.
-func writeScopeError(c *gin.Context, err error) {
-	if errors.Is(err, errStaleCompanyContext) {
-		response.Error(c, http.StatusForbidden, "Company context is no longer valid for this user", "stale_company_context")
-		return
-	}
-	response.Error(c, http.StatusForbidden, "Company context required", "")
-}
-
-// resolveTenantScope returns the tenant scope that must be applied to the
-// current caller, or nil for super admins (who see everything). Returns an
-// error when a non-super-admin caller has no company context — the caller
-// must have switched into a company before hitting these endpoints.
-//
-// When a company verifier is wired (production), it also re-checks against
-// the database that the company still exists, is active, and that the caller
-// is still a member of it.
-func (h *UserHandler) resolveTenantScope(c *gin.Context) (*service.TenantScope, error) {
+// callerIsSuperAdmin reports whether the authenticated caller holds the
+// super_admin role. The service uses it to stop non-super-admins from
+// granting or tampering with super_admin accounts.
+func callerIsSuperAdmin(c *gin.Context) bool {
 	claims, _ := middleware.GetUserFromContext(c)
-	if claims != nil && claims.HasRole("super_admin") {
-		return nil, nil
-	}
-	companyID := middleware.GetCompanyID(c)
-	if companyID == "" {
-		return nil, errors.New("company context required")
-	}
-	userID := middleware.MustGetUserID(c)
-	if h.companyVerifier != nil {
-		if err := h.companyVerifier.VerifyMembership(c.Request.Context(), userID, companyID); err != nil {
-			return nil, errStaleCompanyContext
-		}
-	}
-	return &service.TenantScope{
-		CompanyID:    companyID,
-		CallerUserID: userID,
-	}, nil
+	return claims != nil && claims.HasRole("super_admin")
 }
 
 func (h *UserHandler) GetAll(c *gin.Context) {
@@ -82,14 +37,8 @@ func (h *UserHandler) GetAll(c *gin.Context) {
 		return
 	}
 
-	scope, err := h.resolveTenantScope(c)
-	if err != nil {
-		writeScopeError(c, err)
-		return
-	}
-
 	ctx := c.Request.Context()
-	result, err := h.userService.GetAll(ctx, &params, scope)
+	result, err := h.userService.GetAll(ctx, &params)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, "Failed to get users", err.Error())
 		return
@@ -106,14 +55,8 @@ func (h *UserHandler) GetByID(c *gin.Context) {
 		return
 	}
 
-	scope, err := h.resolveTenantScope(c)
-	if err != nil {
-		writeScopeError(c, err)
-		return
-	}
-
 	ctx := c.Request.Context()
-	result, err := h.userService.GetByID(ctx, id, scope)
+	result, err := h.userService.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, service.ErrUserNotFound) {
 			response.Error(c, http.StatusNotFound, "User not found", "")
@@ -133,40 +76,20 @@ func (h *UserHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Enforce tenant scope: non-super-admin users can only assign the new
-	// user to their current company. Ignore any company_ids sent in the body
-	// to prevent adding users to tenants the caller does not own.
-	scope, err := h.resolveTenantScope(c)
-	if err != nil {
-		writeScopeError(c, err)
-		return
-	}
-	if scope != nil {
-		req.CompanyIDs = []string{scope.CompanyID}
-	}
-
 	createdBy := middleware.MustGetUserID(c)
 	ctx := c.Request.Context()
 
-	result, err := h.userService.Create(ctx, &req, createdBy, scope)
+	result, err := h.userService.Create(ctx, &req, createdBy, callerIsSuperAdmin(c))
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrEmailAlreadyExists):
 			response.Error(c, http.StatusConflict, "Email already exists", "")
 		case errors.Is(err, service.ErrUsernameAlreadyExists):
 			response.Error(c, http.StatusConflict, "Username already exists", "")
-		case errors.Is(err, service.ErrCompanyNotFound):
-			// One of the submitted company_ids does not exist (or was
-			// soft-deleted). The transaction has been rolled back.
-			response.Error(c, http.StatusBadRequest, "Invalid company_ids", err.Error())
-		case errors.Is(err, service.ErrCompaniesRequired):
-			response.Error(c, http.StatusBadRequest, "company_ids is required", "")
+		case errors.Is(err, service.ErrRoleNotFound):
+			response.Error(c, http.StatusBadRequest, "Invalid role_id", "")
 		case errors.Is(err, service.ErrRoleNotAllowed):
 			response.Error(c, http.StatusForbidden, "Role not allowed for caller", "")
-		case errors.Is(err, branchService.ErrInvalidBranchIDs):
-			response.Error(c, http.StatusBadRequest, "Invalid branch_ids", err.Error())
-		case errors.Is(err, branchService.ErrBranchNotInScope):
-			response.Error(c, http.StatusForbidden, "Branch not in caller's scope", err.Error())
 		default:
 			response.Error(c, http.StatusInternalServerError, "Failed to create user", err.Error())
 		}
@@ -189,22 +112,10 @@ func (h *UserHandler) Update(c *gin.Context) {
 		return
 	}
 
-	// Non-super-admin cannot modify a user's company memberships through this
-	// endpoint. SyncUserCompanies replaces the full set, so accepting it here
-	// would let a company admin evict a user from other tenants they don't own.
-	scope, err := h.resolveTenantScope(c)
-	if err != nil {
-		writeScopeError(c, err)
-		return
-	}
-	if scope != nil {
-		req.CompanyIDs = nil
-	}
-
 	updatedBy := middleware.MustGetUserID(c)
 	ctx := c.Request.Context()
 
-	result, err := h.userService.Update(ctx, id, &req, updatedBy, scope)
+	result, err := h.userService.Update(ctx, id, &req, updatedBy, callerIsSuperAdmin(c))
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrUserNotFound):
@@ -213,14 +124,12 @@ func (h *UserHandler) Update(c *gin.Context) {
 			response.Error(c, http.StatusConflict, "Email already exists", "")
 		case errors.Is(err, service.ErrUsernameAlreadyExists):
 			response.Error(c, http.StatusConflict, "Username already exists", "")
-		case errors.Is(err, service.ErrCompanyNotFound):
-			response.Error(c, http.StatusBadRequest, "Invalid company_ids", err.Error())
+		case errors.Is(err, service.ErrRoleNotFound):
+			response.Error(c, http.StatusBadRequest, "Invalid role_id", "")
 		case errors.Is(err, service.ErrRoleNotAllowed):
 			response.Error(c, http.StatusForbidden, "Role not allowed for caller", "")
-		case errors.Is(err, branchService.ErrInvalidBranchIDs):
-			response.Error(c, http.StatusBadRequest, "Invalid branch_ids", err.Error())
-		case errors.Is(err, branchService.ErrBranchNotInScope):
-			response.Error(c, http.StatusForbidden, "Branch not in caller's scope", err.Error())
+		case errors.Is(err, service.ErrCannotManageSuperAdmin):
+			response.Error(c, http.StatusForbidden, "Cannot manage a super admin user", "")
 		default:
 			response.Error(c, http.StatusInternalServerError, "Failed to update user", err.Error())
 		}
@@ -237,22 +146,19 @@ func (h *UserHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	scope, err := h.resolveTenantScope(c)
-	if err != nil {
-		writeScopeError(c, err)
-		return
-	}
-
 	deletedBy := middleware.MustGetUserID(c)
 	ctx := c.Request.Context()
 
-	err = h.userService.Delete(ctx, id, deletedBy, scope)
+	err := h.userService.Delete(ctx, id, deletedBy, callerIsSuperAdmin(c))
 	if err != nil {
-		if errors.Is(err, service.ErrUserNotFound) {
+		switch {
+		case errors.Is(err, service.ErrUserNotFound):
 			response.Error(c, http.StatusNotFound, "User not found", "")
-			return
+		case errors.Is(err, service.ErrCannotManageSuperAdmin):
+			response.Error(c, http.StatusForbidden, "Cannot manage a super admin user", "")
+		default:
+			response.Error(c, http.StatusInternalServerError, "Failed to delete user", err.Error())
 		}
-		response.Error(c, http.StatusInternalServerError, "Failed to delete user", err.Error())
 		return
 	}
 

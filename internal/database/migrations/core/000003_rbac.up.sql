@@ -21,7 +21,6 @@ CREATE TABLE IF NOT EXISTS core.roles (
 
     -- Scope
     is_system BOOLEAN DEFAULT FALSE,  -- System roles cannot be modified
-    company_id UUID,                   -- NULL = global role, UUID = company-specific role
 
     -- Status
     is_active BOOLEAN DEFAULT TRUE,
@@ -35,15 +34,12 @@ CREATE TABLE IF NOT EXISTS core.roles (
     deleted_by UUID
 );
 
--- Unique constraint: code must be unique per scope (global or within company)
-CREATE UNIQUE INDEX roles_code_global_key ON core.roles(code)
-    WHERE company_id IS NULL AND deleted_at IS NULL;
-CREATE UNIQUE INDEX roles_code_company_key ON core.roles(company_id, code)
-    WHERE company_id IS NOT NULL AND deleted_at IS NULL;
+-- Unique constraint: code must be unique among active roles
+CREATE UNIQUE INDEX roles_code_active_key ON core.roles(code)
+    WHERE deleted_at IS NULL;
 
 -- Performance indexes
 CREATE INDEX idx_roles_code ON core.roles(code) WHERE deleted_at IS NULL;
-CREATE INDEX idx_roles_company_id ON core.roles(company_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_roles_is_system ON core.roles(is_system) WHERE deleted_at IS NULL;
 CREATE INDEX idx_roles_is_active ON core.roles(is_active) WHERE deleted_at IS NULL;
 CREATE INDEX idx_roles_permissions ON core.roles USING GIN(permissions);
@@ -54,38 +50,16 @@ CREATE TABLE IF NOT EXISTS core.user_roles (
     user_id UUID NOT NULL REFERENCES core.users(id) ON DELETE CASCADE,
     role_id UUID NOT NULL REFERENCES core.roles(id) ON DELETE CASCADE,
 
-    -- Scope: which company this role assignment applies to
-    -- NULL = global assignment (user has this role everywhere)
-    -- UUID = role only applies within specific company
-    company_id UUID,
-
     -- Audit
     created_at TIMESTAMPTZ DEFAULT NOW(),
     created_by UUID,
 
-    PRIMARY KEY (user_id, role_id, company_id)
+    PRIMARY KEY (user_id, role_id)
 );
-
--- Handle NULL company_id in primary key (use COALESCE for unique constraint)
--- Drop the primary key and create a new one without company_id
-ALTER TABLE core.user_roles DROP CONSTRAINT user_roles_pkey;
-ALTER TABLE core.user_roles ADD PRIMARY KEY (user_id, role_id);
-
--- Allow NULL on company_id (was implicitly NOT NULL when part of PK)
-ALTER TABLE core.user_roles ALTER COLUMN company_id DROP NOT NULL;
-
--- Partial unique index to prevent duplicate role assignments per company
-CREATE UNIQUE INDEX user_roles_user_role_company_key
-    ON core.user_roles(user_id, role_id, company_id)
-    WHERE company_id IS NOT NULL;
-CREATE UNIQUE INDEX user_roles_user_role_global_key
-    ON core.user_roles(user_id, role_id)
-    WHERE company_id IS NULL;
 
 -- Performance indexes
 CREATE INDEX idx_user_roles_user_id ON core.user_roles(user_id);
 CREATE INDEX idx_user_roles_role_id ON core.user_roles(role_id);
-CREATE INDEX idx_user_roles_company_id ON core.user_roles(company_id) WHERE company_id IS NOT NULL;
 
 
 -- =====================================================
@@ -95,10 +69,8 @@ COMMENT ON TABLE core.roles IS 'Role definitions with JSON-based permissions';
 COMMENT ON COLUMN core.roles.code IS 'Unique identifier for the role (snake_case)';
 COMMENT ON COLUMN core.roles.permissions IS 'JSONB object mapping resources to permission levels (viewer/editor/admin)';
 COMMENT ON COLUMN core.roles.is_system IS 'System roles cannot be modified or deleted';
-COMMENT ON COLUMN core.roles.company_id IS 'NULL for global roles, UUID for company-specific roles';
 
-COMMENT ON TABLE core.user_roles IS 'Junction table linking users to roles with optional company scope';
-COMMENT ON COLUMN core.user_roles.company_id IS 'NULL = global assignment, UUID = company-scoped assignment';
+COMMENT ON TABLE core.user_roles IS 'Junction table linking users to roles';
 
 
 -- =====================================================

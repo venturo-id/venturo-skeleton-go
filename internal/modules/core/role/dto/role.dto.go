@@ -2,17 +2,13 @@ package dto
 
 import "time"
 
-// CreateRoleRequest represents request to create a new role.
-// Note: CompanyID is NOT accepted from the client. It is always set by the
-// handler from the authenticated user's JWT context to prevent cross-tenant
-// role leakage.
+// CreateRoleRequest represents request to create a new role
 type CreateRoleRequest struct {
 	Code        string            `json:"code" binding:"required,min=2,max=50"`
 	Name        string            `json:"name" binding:"required,min=2,max=100"`
 	Description *string           `json:"description" binding:"omitempty,max=1000"`
 	Permissions map[string]string `json:"permissions" binding:"required"`
 	IsActive    *bool             `json:"is_active"`
-	CompanyID   *string           `json:"-"` // Set by handler from JWT, never from body
 }
 
 // UpdateRoleRequest represents request to update a role
@@ -37,7 +33,6 @@ type RoleResponse struct {
 	Permissions map[string]string `json:"permissions"`
 	IsSystem    bool              `json:"is_system"`
 	IsActive    bool              `json:"is_active"`
-	CompanyID   *string           `json:"company_id,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	CreatedBy   *string           `json:"created_by,omitempty"`
 	UpdatedAt   time.Time         `json:"updated_at"`
@@ -56,22 +51,18 @@ type RoleQueryParams struct {
 	Page          int      `form:"page,default=1" binding:"min=1"`
 	Limit         int      `form:"limit,default=10" binding:"min=1,max=100"`
 	Search        string   `form:"search" binding:"omitempty,max=255"`
-	CompanyID     *string  `form:"company_id" binding:"omitempty,uuid"`
-	IncludeGlobal *bool    `form:"include_global"`
 	ExcludeSystem *bool    `form:"-"` // Internal use only: exclude is_system roles
 	ExcludeCodes  []string `form:"-"` // Internal use only: exclude roles with these codes
 }
 
 // AssignRoleRequest represents request to assign a role to a user
 type AssignRoleRequest struct {
-	UserID    string  `json:"user_id" binding:"required,uuid"`
-	RoleID    string  `json:"role_id" binding:"required,uuid"`
-	CompanyID *string `json:"company_id" binding:"omitempty,uuid"`
+	UserID string `json:"user_id" binding:"required,uuid"`
+	RoleID string `json:"role_id" binding:"required,uuid"`
 }
 
 // RemoveRoleRequest represents request to remove a role from a user
 type RemoveRoleRequest struct {
-	UserID    string  `json:"user_id" binding:"required,uuid"`
-	RoleID    string  `json:"role_id" binding:"required,uuid"`
-	CompanyID *string `json:"company_id" binding:"omitempty,uuid"`
+	UserID string `json:"user_id" binding:"required,uuid"`
+	RoleID string `json:"role_id" binding:"required,uuid"`
 }

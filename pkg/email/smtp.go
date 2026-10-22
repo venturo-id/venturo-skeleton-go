@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/pkg/logger"
 
 	"gopkg.in/gomail.v2"
 )

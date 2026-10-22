@@ -12,11 +12,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"venturo-skeleton-go/internal/modules/core/api_key/domain"
-	"venturo-skeleton-go/internal/modules/core/api_key/dto"
-	"venturo-skeleton-go/internal/modules/core/api_key/repository"
-	"venturo-skeleton-go/pkg/jwt"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key/domain"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key/dto"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key/repository"
+	"venturo-skeleton-go-simple/pkg/jwt"
+	"venturo-skeleton-go-simple/pkg/logger"
 )
 
 // Service errors
@@ -33,8 +33,8 @@ var (
 
 // RoleRepository interface for getting user permissions
 type RoleRepository interface {
-	GetUserPermissions(ctx context.Context, userID string, companyID *string) ([]string, error)
-	GetUserRoleNames(ctx context.Context, userID string, companyID *string) ([]string, error)
+	GetUserPermissions(ctx context.Context, userID string) ([]string, error)
+	GetUserRoleNames(ctx context.Context, userID string) ([]string, error)
 }
 
 // UserRepository interface for getting user info
@@ -58,7 +58,7 @@ func NewApiKeyService(apiKeyRepo *repository.ApiKeyRepository, roleRepo RoleRepo
 func (s *ApiKeyService) Create(
 	ctx context.Context,
 	req *dto.CreateApiKeyRequest,
-	userID, companyID, createdBy string,
+	userID, createdBy string,
 ) (*dto.CreateApiKeyResponse, error) {
 	// Set defaults
 	environment := domain.EnvLive
@@ -88,7 +88,7 @@ func (s *ApiKeyService) Create(
 
 	// Validate scoped permissions
 	if len(req.ScopedPermissions) > 0 {
-		if err := s.validateScopes(ctx, userID, companyID, req.ScopedPermissions); err != nil {
+		if err := s.validateScopes(ctx, userID, req.ScopedPermissions); err != nil {
 			return nil, err
 		}
 	}
@@ -117,7 +117,6 @@ func (s *ApiKeyService) Create(
 	apiKey := &domain.ApiKey{
 		ID:                uuid.New().String(),
 		UserID:            userID,
-		CompanyID:         companyID,
 		KeyID:             keyID,
 		SecretHash:        secretHash,
 		KeyPrefix:         keyPrefix,
@@ -143,7 +142,6 @@ func (s *ApiKeyService) Create(
 	logger.Info("API key created",
 		logger.String("api_key_id", apiKey.ID),
 		logger.String("user_id", userID),
-		logger.String("company_id", companyID),
 	)
 
 	return &dto.CreateApiKeyResponse{
@@ -155,9 +153,9 @@ func (s *ApiKeyService) Create(
 	}, nil
 }
 
-// GetByID gets an API key by ID
-func (s *ApiKeyService) GetByID(ctx context.Context, id, companyID string) (*dto.ApiKeyResponse, error) {
-	apiKey, err := s.apiKeyRepo.FindByID(ctx, id, companyID)
+// GetByID gets an API key by ID, restricted to keys owned by userID
+func (s *ApiKeyService) GetByID(ctx context.Context, id, userID string) (*dto.ApiKeyResponse, error) {
+	apiKey, err := s.apiKeyRepo.FindByID(ctx, id, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -168,10 +166,10 @@ func (s *ApiKeyService) GetByID(ctx context.Context, id, companyID string) (*dto
 	return s.toResponse(apiKey), nil
 }
 
-// List lists all API keys for a user in a company
+// List lists all API keys owned by a user
 func (s *ApiKeyService) List(
 	ctx context.Context,
-	userID, companyID string,
+	userID string,
 	params *dto.ApiKeyQueryParams,
 ) (*dto.ApiKeyListResponse, error) {
 	// Set defaults
@@ -186,8 +184,8 @@ func (s *ApiKeyService) List(
 
 	offset := (page - 1) * pageSize
 
-	apiKeys, total, err := s.apiKeyRepo.FindAllByUserAndCompany(
-		ctx, userID, companyID, pageSize, offset, params.Environment, params.IsActive,
+	apiKeys, total, err := s.apiKeyRepo.FindAllByUser(
+		ctx, userID, pageSize, offset, params.Environment, params.IsActive,
 	)
 	if err != nil {
 		return nil, err
@@ -209,10 +207,10 @@ func (s *ApiKeyService) List(
 // Update updates an API key
 func (s *ApiKeyService) Update(
 	ctx context.Context,
-	id, companyID, userID string,
+	id, userID string,
 	req *dto.UpdateApiKeyRequest,
 ) (*dto.ApiKeyResponse, error) {
-	apiKey, err := s.apiKeyRepo.FindByID(ctx, id, companyID)
+	apiKey, err := s.apiKeyRepo.FindByID(ctx, id, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -220,14 +218,9 @@ func (s *ApiKeyService) Update(
 		return nil, ErrApiKeyNotFound
 	}
 
-	// Check ownership
-	if apiKey.UserID != userID {
-		return nil, ErrApiKeyNotFound
-	}
-
 	// Validate scoped permissions if provided
 	if len(req.ScopedPermissions) > 0 {
-		if err := s.validateScopes(ctx, userID, companyID, req.ScopedPermissions); err != nil {
+		if err := s.validateScopes(ctx, userID, req.ScopedPermissions); err != nil {
 			return nil, err
 		}
 	}
@@ -270,10 +263,10 @@ func (s *ApiKeyService) Update(
 // Revoke revokes an API key
 func (s *ApiKeyService) Revoke(
 	ctx context.Context,
-	id, companyID, userID string,
+	id, userID string,
 	req *dto.RevokeApiKeyRequest,
 ) error {
-	apiKey, err := s.apiKeyRepo.FindByID(ctx, id, companyID)
+	apiKey, err := s.apiKeyRepo.FindByID(ctx, id, userID)
 	if err != nil {
 		return err
 	}
@@ -281,12 +274,7 @@ func (s *ApiKeyService) Revoke(
 		return ErrApiKeyNotFound
 	}
 
-	// Check ownership
-	if apiKey.UserID != userID {
-		return ErrApiKeyNotFound
-	}
-
-	if err := s.apiKeyRepo.Revoke(ctx, id, companyID, userID, req.Reason); err != nil {
+	if err := s.apiKeyRepo.Revoke(ctx, id, userID, userID, req.Reason); err != nil {
 		return err
 	}
 
@@ -341,8 +329,8 @@ func (s *ApiKeyService) ValidateAndGetClaims(
 	// Get user permissions
 	var roles, permissions []string
 	if s.roleRepo != nil {
-		roles, _ = s.roleRepo.GetUserRoleNames(ctx, apiKey.UserID, &apiKey.CompanyID)
-		userPerms, _ := s.roleRepo.GetUserPermissions(ctx, apiKey.UserID, &apiKey.CompanyID)
+		roles, _ = s.roleRepo.GetUserRoleNames(ctx, apiKey.UserID)
+		userPerms, _ := s.roleRepo.GetUserPermissions(ctx, apiKey.UserID)
 		permissions = apiKey.GetEffectivePermissions(userPerms)
 	}
 
@@ -352,7 +340,6 @@ func (s *ApiKeyService) ValidateAndGetClaims(
 	// through the Redis cache that RequirePermission uses for JWTs.
 	claims := &jwt.Claims{
 		UserID:            apiKey.UserID,
-		CompanyID:         apiKey.CompanyID,
 		Roles:             roles,
 		ScopedPermissions: permissions,
 	}
@@ -361,12 +348,12 @@ func (s *ApiKeyService) ValidateAndGetClaims(
 }
 
 // validateScopes validates that the requested scopes are a subset of user's permissions
-func (s *ApiKeyService) validateScopes(ctx context.Context, userID, companyID string, scopes []string) error {
+func (s *ApiKeyService) validateScopes(ctx context.Context, userID string, scopes []string) error {
 	if s.roleRepo == nil {
 		return nil
 	}
 
-	userPerms, err := s.roleRepo.GetUserPermissions(ctx, userID, &companyID)
+	userPerms, err := s.roleRepo.GetUserPermissions(ctx, userID)
 	if err != nil {
 		return err
 	}

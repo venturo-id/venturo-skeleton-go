@@ -6,16 +6,16 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go/internal/middleware"
-	"venturo-skeleton-go/internal/modules/core/api_key/handler"
-	"venturo-skeleton-go/internal/modules/core/api_key/repository"
-	"venturo-skeleton-go/internal/modules/core/api_key/service"
+	"venturo-skeleton-go-simple/internal/middleware"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key/handler"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key/repository"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key/service"
 )
 
 // RoleRepository interface for role operations
 type RoleRepository interface {
-	GetUserPermissions(ctx context.Context, userID string, companyID *string) ([]string, error)
-	GetUserRoleNames(ctx context.Context, userID string, companyID *string) ([]string, error)
+	GetUserPermissions(ctx context.Context, userID string) ([]string, error)
+	GetUserRoleNames(ctx context.Context, userID string) ([]string, error)
 }
 
 // ApiKeyModule holds all components of the API key module
@@ -40,10 +40,9 @@ func Initialize(db *pgxpool.Pool, roleRepo RoleRepository) *ApiKeyModule {
 
 // SetupRoutes registers all routes for the API key module
 func (m *ApiKeyModule) SetupRoutes(router *gin.RouterGroup) {
-	// All routes require JWT auth and company context
+	// All routes require JWT auth; keys are scoped to the calling user
 	apiKeys := router.Group("/api-keys")
 	apiKeys.Use(middleware.JWTAuth())
-	apiKeys.Use(middleware.CompanyContext())
 	{
 		// Create a new API key
 		apiKeys.POST("", m.Handler.Create)

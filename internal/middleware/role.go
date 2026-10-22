@@ -3,9 +3,9 @@ package middleware
 import (
 	"net/http"
 
-	"venturo-skeleton-go/internal/shared/authz"
-	"venturo-skeleton-go/internal/shared/response"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/internal/shared/authz"
+	"venturo-skeleton-go-simple/internal/shared/response"
+	"venturo-skeleton-go-simple/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 )
@@ -134,7 +134,7 @@ func RequirePermission(permission string) gin.HandlerFunc {
 			return
 		}
 
-		ok, err := authzService.Has(c.Request.Context(), claims.UserID, claims.CompanyID, permission)
+		ok, err := authzService.Has(c.Request.Context(), claims.UserID, permission)
 		if err != nil {
 			logger.Error("Failed to evaluate permission",
 				logger.String("user_id", claims.UserID),
@@ -197,7 +197,7 @@ func RequireAnyPermission(permissions ...string) gin.HandlerFunc {
 			return
 		}
 
-		ok, err := authzService.HasAny(c.Request.Context(), claims.UserID, claims.CompanyID, permissions...)
+		ok, err := authzService.HasAny(c.Request.Context(), claims.UserID, permissions...)
 		if err != nil {
 			logger.Error("Failed to evaluate permissions",
 				logger.String("user_id", claims.UserID),
@@ -259,7 +259,7 @@ func RequireAllPermissions(permissions ...string) gin.HandlerFunc {
 			return
 		}
 
-		ok, err := authzService.HasAll(c.Request.Context(), claims.UserID, claims.CompanyID, permissions...)
+		ok, err := authzService.HasAll(c.Request.Context(), claims.UserID, permissions...)
 		if err != nil {
 			logger.Error("Failed to evaluate permissions",
 				logger.String("user_id", claims.UserID),

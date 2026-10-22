@@ -8,11 +8,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go/internal/modules/core/role/domain"
-	"venturo-skeleton-go/internal/modules/core/role/dto"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/internal/modules/core/role/domain"
+	"venturo-skeleton-go-simple/internal/modules/core/role/dto"
+	"venturo-skeleton-go-simple/pkg/logger"
 )
 
 type RoleRepository struct {
@@ -23,18 +24,24 @@ func NewRoleRepository(db *pgxpool.Pool) *RoleRepository {
 	return &RoleRepository{db: db}
 }
 
+// dbExec is the minimal subset of *pgxpool.Pool / pgx.Tx that we need for
+// shared write helpers. Both types satisfy this implicitly.
+type dbExec interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
 // Create creates a new role
 func (r *RoleRepository) Create(ctx context.Context, role *domain.Role) error {
 	query := `
 		INSERT INTO core.roles (
-			id, code, name, description, permissions, is_system, is_active, company_id,
+			id, code, name, description, permissions, is_system, is_active,
 			created_at, created_by, updated_at, updated_by
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
 
 	_, err := r.db.Exec(ctx, query,
 		role.ID, role.Code, role.Name, role.Description, role.Permissions,
-		role.IsSystem, role.IsActive, role.CompanyID,
+		role.IsSystem, role.IsActive,
 		role.CreatedAt, role.CreatedBy, role.UpdatedAt, role.UpdatedBy,
 	)
 
@@ -49,7 +56,7 @@ func (r *RoleRepository) Create(ctx context.Context, role *domain.Role) error {
 // FindByID finds a role by ID
 func (r *RoleRepository) FindByID(ctx context.Context, id string) (*domain.Role, error) {
 	query := `
-		SELECT id, code, name, description, permissions, is_system, is_active, company_id,
+		SELECT id, code, name, description, permissions, is_system, is_active,
 		       created_at, created_by, updated_at, updated_by, deleted_at, deleted_by
 		FROM core.roles
 		WHERE id = $1 AND deleted_at IS NULL
@@ -58,7 +65,7 @@ func (r *RoleRepository) FindByID(ctx context.Context, id string) (*domain.Role,
 	var role domain.Role
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&role.ID, &role.Code, &role.Name, &role.Description, &role.Permissions,
-		&role.IsSystem, &role.IsActive, &role.CompanyID,
+		&role.IsSystem, &role.IsActive,
 		&role.CreatedAt, &role.CreatedBy, &role.UpdatedAt, &role.UpdatedBy,
 		&role.DeletedAt, &role.DeletedBy,
 	)
@@ -74,33 +81,19 @@ func (r *RoleRepository) FindByID(ctx context.Context, id string) (*domain.Role,
 	return &role, nil
 }
 
-// FindByCode finds a role by code within a scope (global or company)
-func (r *RoleRepository) FindByCode(ctx context.Context, code string, companyID *string) (*domain.Role, error) {
-	var query string
-	var args []interface{}
-
-	if companyID == nil {
-		query = `
-			SELECT id, code, name, description, permissions, is_system, is_active, company_id,
-			       created_at, created_by, updated_at, updated_by, deleted_at, deleted_by
-			FROM core.roles
-			WHERE code = $1 AND company_id IS NULL AND deleted_at IS NULL
-		`
-		args = []interface{}{code}
-	} else {
-		query = `
-			SELECT id, code, name, description, permissions, is_system, is_active, company_id,
-			       created_at, created_by, updated_at, updated_by, deleted_at, deleted_by
-			FROM core.roles
-			WHERE code = $1 AND company_id = $2 AND deleted_at IS NULL
-		`
-		args = []interface{}{code, *companyID}
-	}
+// FindByCode finds a role by code
+func (r *RoleRepository) FindByCode(ctx context.Context, code string) (*domain.Role, error) {
+	query := `
+		SELECT id, code, name, description, permissions, is_system, is_active,
+		       created_at, created_by, updated_at, updated_by, deleted_at, deleted_by
+		FROM core.roles
+		WHERE code = $1 AND deleted_at IS NULL
+	`
 
 	var role domain.Role
-	err := r.db.QueryRow(ctx, query, args...).Scan(
+	err := r.db.QueryRow(ctx, query, code).Scan(
 		&role.ID, &role.Code, &role.Name, &role.Description, &role.Permissions,
-		&role.IsSystem, &role.IsActive, &role.CompanyID,
+		&role.IsSystem, &role.IsActive,
 		&role.CreatedAt, &role.CreatedBy, &role.UpdatedAt, &role.UpdatedBy,
 		&role.DeletedAt, &role.DeletedBy,
 	)
@@ -147,25 +140,6 @@ func (r *RoleRepository) FindAll(ctx context.Context, params *dto.RoleQueryParam
 		argIndex++
 	}
 
-	// Filter by company
-	if params.CompanyID != nil {
-		if params.IncludeGlobal != nil && *params.IncludeGlobal {
-			// Include both global and company-specific roles
-			conditions = append(conditions, fmt.Sprintf(
-				"(company_id IS NULL OR company_id = $%d)",
-				argIndex,
-			))
-		} else {
-			// Only company-specific roles
-			conditions = append(conditions, fmt.Sprintf("company_id = $%d", argIndex))
-		}
-		args = append(args, *params.CompanyID)
-		argIndex++
-	} else if params.IncludeGlobal == nil || *params.IncludeGlobal {
-		// Only global roles when no company specified
-		conditions = append(conditions, "company_id IS NULL")
-	}
-
 	whereClause := strings.Join(conditions, " AND ")
 
 	// Count query
@@ -180,7 +154,7 @@ func (r *RoleRepository) FindAll(ctx context.Context, params *dto.RoleQueryParam
 	// Data query
 	offset := (params.Page - 1) * params.Limit
 	dataQuery := fmt.Sprintf(`
-		SELECT id, code, name, description, permissions, is_system, is_active, company_id,
+		SELECT id, code, name, description, permissions, is_system, is_active,
 		       created_at, created_by, updated_at, updated_by, deleted_at, deleted_by
 		FROM core.roles
 		WHERE %s
@@ -202,7 +176,7 @@ func (r *RoleRepository) FindAll(ctx context.Context, params *dto.RoleQueryParam
 		var role domain.Role
 		err := rows.Scan(
 			&role.ID, &role.Code, &role.Name, &role.Description, &role.Permissions,
-			&role.IsSystem, &role.IsActive, &role.CompanyID,
+			&role.IsSystem, &role.IsActive,
 			&role.CreatedAt, &role.CreatedBy, &role.UpdatedAt, &role.UpdatedBy,
 			&role.DeletedAt, &role.DeletedBy,
 		)
@@ -274,14 +248,25 @@ func (r *RoleRepository) SoftDelete(ctx context.Context, id, deletedBy string) e
 }
 
 // AssignRoleToUser assigns a role to a user
-func (r *RoleRepository) AssignRoleToUser(ctx context.Context, userID, roleID string, companyID *string, createdBy string) error {
+func (r *RoleRepository) AssignRoleToUser(ctx context.Context, userID, roleID, createdBy string) error {
+	return r.assignRoleWith(ctx, r.db, userID, roleID, createdBy)
+}
+
+// AssignRoleToUserTx assigns a role to a user inside an existing transaction.
+// Use this when the caller needs to create the user and its role assignment
+// atomically.
+func (r *RoleRepository) AssignRoleToUserTx(ctx context.Context, tx pgx.Tx, userID, roleID, createdBy string) error {
+	return r.assignRoleWith(ctx, tx, userID, roleID, createdBy)
+}
+
+func (r *RoleRepository) assignRoleWith(ctx context.Context, q dbExec, userID, roleID, createdBy string) error {
 	query := `
-		INSERT INTO core.user_roles (user_id, role_id, company_id, created_at, created_by)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO core.user_roles (user_id, role_id, created_at, created_by)
+		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (user_id, role_id) DO NOTHING
 	`
 
-	_, err := r.db.Exec(ctx, query, userID, roleID, companyID, time.Now(), createdBy)
+	_, err := q.Exec(ctx, query, userID, roleID, time.Now(), createdBy)
 	if err != nil {
 		logger.Error("Failed to assign role to user", logger.Err(err))
 		return err
@@ -290,20 +275,33 @@ func (r *RoleRepository) AssignRoleToUser(ctx context.Context, userID, roleID st
 	return nil
 }
 
-// RemoveRoleFromUser removes a role from a user
-func (r *RoleRepository) RemoveRoleFromUser(ctx context.Context, userID, roleID string, companyID *string) error {
-	var query string
-	var args []interface{}
+// ReplaceUserRoles replaces every role held by a user with a single role.
+// The delete and insert run in one transaction so the user is never left
+// without a role on failure.
+func (r *RoleRepository) ReplaceUserRoles(ctx context.Context, userID, roleID, createdBy string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	// Rollback is a no-op after a successful Commit.
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	if companyID == nil {
-		query = `DELETE FROM core.user_roles WHERE user_id = $1 AND role_id = $2 AND company_id IS NULL`
-		args = []interface{}{userID, roleID}
-	} else {
-		query = `DELETE FROM core.user_roles WHERE user_id = $1 AND role_id = $2 AND company_id = $3`
-		args = []interface{}{userID, roleID, *companyID}
+	if _, err := tx.Exec(ctx, `DELETE FROM core.user_roles WHERE user_id = $1`, userID); err != nil {
+		logger.Error("Failed to clear user roles", logger.Err(err))
+		return err
+	}
+	if err := r.assignRoleWith(ctx, tx, userID, roleID, createdBy); err != nil {
+		return err
 	}
 
-	_, err := r.db.Exec(ctx, query, args...)
+	return tx.Commit(ctx)
+}
+
+// RemoveRoleFromUser removes a role from a user
+func (r *RoleRepository) RemoveRoleFromUser(ctx context.Context, userID, roleID string) error {
+	query := `DELETE FROM core.user_roles WHERE user_id = $1 AND role_id = $2`
+
+	_, err := r.db.Exec(ctx, query, userID, roleID)
 	if err != nil {
 		logger.Error("Failed to remove role from user", logger.Err(err))
 		return err
@@ -312,44 +310,18 @@ func (r *RoleRepository) RemoveRoleFromUser(ctx context.Context, userID, roleID 
 	return nil
 }
 
-// GetUserRoles gets all roles for a user.
-// Reads from both core.user_roles and core.company_users.role_id to cover both assignment methods.
-func (r *RoleRepository) GetUserRoles(ctx context.Context, userID string, companyID *string) ([]domain.Role, error) {
-	var query string
-	var args []interface{}
+// GetUserRoles gets all roles assigned to a user
+func (r *RoleRepository) GetUserRoles(ctx context.Context, userID string) ([]domain.Role, error) {
+	query := `
+		SELECT r.id, r.code, r.name, r.description, r.permissions, r.is_system, r.is_active,
+		       r.created_at, r.created_by, r.updated_at, r.updated_by, r.deleted_at, r.deleted_by
+		FROM core.roles r
+		JOIN core.user_roles ur ON r.id = ur.role_id
+		WHERE ur.user_id = $1 AND r.deleted_at IS NULL
+		ORDER BY ur.created_at
+	`
 
-	if companyID == nil {
-		// Get global roles only (from user_roles)
-		query = `
-			SELECT DISTINCT r.id, r.code, r.name, r.description, r.permissions, r.is_system, r.is_active, r.company_id,
-			       r.created_at, r.created_by, r.updated_at, r.updated_by, r.deleted_at, r.deleted_by
-			FROM core.roles r
-			JOIN core.user_roles ur ON r.id = ur.role_id
-			WHERE ur.user_id = $1 AND ur.company_id IS NULL AND r.deleted_at IS NULL
-		`
-		args = []interface{}{userID}
-	} else {
-		// Get roles from user_roles + company_users.role_id
-		query = `
-			SELECT DISTINCT r.id, r.code, r.name, r.description, r.permissions, r.is_system, r.is_active, r.company_id,
-			       r.created_at, r.created_by, r.updated_at, r.updated_by, r.deleted_at, r.deleted_by
-			FROM core.roles r
-			WHERE r.deleted_at IS NULL AND (
-				r.id IN (
-					SELECT ur.role_id FROM core.user_roles ur
-					WHERE ur.user_id = $1 AND (ur.company_id IS NULL OR ur.company_id = $2)
-				)
-				OR r.id IN (
-					SELECT cu.role_id FROM core.company_users cu
-					WHERE cu.user_id = $1 AND cu.company_id = $2 AND cu.role_id IS NOT NULL
-					AND cu.is_active = true AND cu.deleted_at IS NULL
-				)
-			)
-		`
-		args = []interface{}{userID, *companyID}
-	}
-
-	rows, err := r.db.Query(ctx, query, args...)
+	rows, err := r.db.Query(ctx, query, userID)
 	if err != nil {
 		logger.Error("Failed to get user roles", logger.Err(err))
 		return nil, err
@@ -361,7 +333,7 @@ func (r *RoleRepository) GetUserRoles(ctx context.Context, userID string, compan
 		var role domain.Role
 		err := rows.Scan(
 			&role.ID, &role.Code, &role.Name, &role.Description, &role.Permissions,
-			&role.IsSystem, &role.IsActive, &role.CompanyID,
+			&role.IsSystem, &role.IsActive,
 			&role.CreatedAt, &role.CreatedBy, &role.UpdatedAt, &role.UpdatedBy,
 			&role.DeletedAt, &role.DeletedBy,
 		)
@@ -376,8 +348,8 @@ func (r *RoleRepository) GetUserRoles(ctx context.Context, userID string, compan
 }
 
 // GetUserPermissions gets all permissions for a user (merged from all roles, expanded to actions)
-func (r *RoleRepository) GetUserPermissions(ctx context.Context, userID string, companyID *string) ([]string, error) {
-	roles, err := r.GetUserRoles(ctx, userID, companyID)
+func (r *RoleRepository) GetUserPermissions(ctx context.Context, userID string) ([]string, error) {
+	roles, err := r.GetUserRoles(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -396,8 +368,8 @@ func (r *RoleRepository) GetUserPermissions(ctx context.Context, userID string, 
 }
 
 // GetUserRoleNames gets all role codes for a user
-func (r *RoleRepository) GetUserRoleNames(ctx context.Context, userID string, companyID *string) ([]string, error) {
-	roles, err := r.GetUserRoles(ctx, userID, companyID)
+func (r *RoleRepository) GetUserRoleNames(ctx context.Context, userID string) ([]string, error) {
+	roles, err := r.GetUserRoles(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -410,24 +382,13 @@ func (r *RoleRepository) GetUserRoleNames(ctx context.Context, userID string, co
 	return codes, nil
 }
 
-// CodeExists checks if a role code already exists within a scope
-func (r *RoleRepository) CodeExists(ctx context.Context, code string, companyID *string, excludeID *string) (bool, error) {
-	var query string
-	var args []interface{}
-	argIndex := 1
-
-	if companyID == nil {
-		query = `SELECT EXISTS(SELECT 1 FROM core.roles WHERE code = $1 AND company_id IS NULL AND deleted_at IS NULL`
-		args = []interface{}{code}
-		argIndex = 2
-	} else {
-		query = `SELECT EXISTS(SELECT 1 FROM core.roles WHERE code = $1 AND company_id = $2 AND deleted_at IS NULL`
-		args = []interface{}{code, *companyID}
-		argIndex = 3
-	}
+// CodeExists checks if a role code already exists
+func (r *RoleRepository) CodeExists(ctx context.Context, code string, excludeID *string) (bool, error) {
+	query := `SELECT EXISTS(SELECT 1 FROM core.roles WHERE code = $1 AND deleted_at IS NULL`
+	args := []interface{}{code}
 
 	if excludeID != nil {
-		query += fmt.Sprintf(` AND id != $%d`, argIndex)
+		query += ` AND id != $2`
 		args = append(args, *excludeID)
 	}
 	query += `)`

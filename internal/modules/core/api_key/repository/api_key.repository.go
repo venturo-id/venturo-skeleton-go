@@ -8,8 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go/internal/modules/core/api_key/domain"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key/domain"
+	"venturo-skeleton-go-simple/pkg/logger"
 )
 
 type ApiKeyRepository struct {
@@ -24,15 +24,15 @@ func NewApiKeyRepository(db *pgxpool.Pool) *ApiKeyRepository {
 func (r *ApiKeyRepository) Create(ctx context.Context, apiKey *domain.ApiKey) error {
 	query := `
 		INSERT INTO core.api_keys (
-			id, user_id, company_id, key_id, secret_hash, key_prefix,
+			id, user_id, key_id, secret_hash, key_prefix,
 			name, description, environment, scoped_permissions, ip_whitelist,
 			rate_limit, rate_limit_window, expires_at,
 			created_at, created_by, updated_at, updated_by
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 	`
 
 	_, err := r.db.Exec(ctx, query,
-		apiKey.ID, apiKey.UserID, apiKey.CompanyID, apiKey.KeyID, apiKey.SecretHash, apiKey.KeyPrefix,
+		apiKey.ID, apiKey.UserID, apiKey.KeyID, apiKey.SecretHash, apiKey.KeyPrefix,
 		apiKey.Name, apiKey.Description, apiKey.Environment, apiKey.ScopedPermissions, apiKey.IPWhitelist,
 		apiKey.RateLimit, apiKey.RateLimitWindow, apiKey.ExpiresAt,
 		apiKey.CreatedAt, apiKey.CreatedBy, apiKey.UpdatedAt, apiKey.UpdatedBy,
@@ -46,25 +46,25 @@ func (r *ApiKeyRepository) Create(ctx context.Context, apiKey *domain.ApiKey) er
 	return nil
 }
 
-// FindByID finds an API key by ID
-func (r *ApiKeyRepository) FindByID(ctx context.Context, id, companyID string) (*domain.ApiKey, error) {
+// FindByID finds an API key by ID, restricted to keys owned by userID
+func (r *ApiKeyRepository) FindByID(ctx context.Context, id, userID string) (*domain.ApiKey, error) {
 	query := `
-		SELECT id, user_id, company_id, key_id, secret_hash, key_prefix,
+		SELECT id, user_id, key_id, secret_hash, key_prefix,
 		       name, description, environment, scoped_permissions, ip_whitelist,
 		       rate_limit, rate_limit_window, expires_at, revoked_at, revoked_by,
 		       revoke_reason, last_used_at, last_used_ip, total_requests,
 		       created_at, created_by, updated_at, updated_by
 		FROM core.api_keys
-		WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL
+		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
 	`
 
-	return r.scanApiKey(ctx, query, id, companyID)
+	return r.scanApiKey(ctx, query, id, userID)
 }
 
 // FindByKeyID finds an API key by its key_id (for authentication)
 func (r *ApiKeyRepository) FindByKeyID(ctx context.Context, keyID string) (*domain.ApiKey, error) {
 	query := `
-		SELECT id, user_id, company_id, key_id, secret_hash, key_prefix,
+		SELECT id, user_id, key_id, secret_hash, key_prefix,
 		       name, description, environment, scoped_permissions, ip_whitelist,
 		       rate_limit, rate_limit_window, expires_at, revoked_at, revoked_by,
 		       revoke_reason, last_used_at, last_used_ip, total_requests,
@@ -76,10 +76,10 @@ func (r *ApiKeyRepository) FindByKeyID(ctx context.Context, keyID string) (*doma
 	return r.scanApiKey(ctx, query, keyID)
 }
 
-// FindAllByUserAndCompany finds all API keys for a user in a company
-func (r *ApiKeyRepository) FindAllByUserAndCompany(
+// FindAllByUser finds all API keys owned by a user
+func (r *ApiKeyRepository) FindAllByUser(
 	ctx context.Context,
-	userID, companyID string,
+	userID string,
 	limit, offset int,
 	environment *string,
 	isActive *bool,
@@ -88,10 +88,10 @@ func (r *ApiKeyRepository) FindAllByUserAndCompany(
 	countQuery := `
 		SELECT COUNT(*)
 		FROM core.api_keys
-		WHERE user_id = $1 AND company_id = $2 AND deleted_at IS NULL
+		WHERE user_id = $1 AND deleted_at IS NULL
 	`
-	args := []interface{}{userID, companyID}
-	argIndex := 3
+	args := []interface{}{userID}
+	argIndex := 2
 
 	if environment != nil {
 		countQuery += ` AND environment = $` + string(rune('0'+argIndex))
@@ -116,17 +116,17 @@ func (r *ApiKeyRepository) FindAllByUserAndCompany(
 
 	// Data query
 	dataQuery := `
-		SELECT id, user_id, company_id, key_id, secret_hash, key_prefix,
+		SELECT id, user_id, key_id, secret_hash, key_prefix,
 		       name, description, environment, scoped_permissions, ip_whitelist,
 		       rate_limit, rate_limit_window, expires_at, revoked_at, revoked_by,
 		       revoke_reason, last_used_at, last_used_ip, total_requests,
 		       created_at, created_by, updated_at, updated_by
 		FROM core.api_keys
-		WHERE user_id = $1 AND company_id = $2 AND deleted_at IS NULL
+		WHERE user_id = $1 AND deleted_at IS NULL
 	`
 
-	args = []interface{}{userID, companyID}
-	argIndex = 3
+	args = []interface{}{userID}
+	argIndex = 2
 
 	if environment != nil {
 		dataQuery += ` AND environment = $` + string(rune('0'+argIndex))
@@ -170,11 +170,11 @@ func (r *ApiKeyRepository) Update(ctx context.Context, apiKey *domain.ApiKey) er
 		UPDATE core.api_keys
 		SET name = $3, description = $4, scoped_permissions = $5, ip_whitelist = $6,
 		    rate_limit = $7, rate_limit_window = $8, updated_at = $9, updated_by = $10
-		WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL
+		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
 	`
 
 	result, err := r.db.Exec(ctx, query,
-		apiKey.ID, apiKey.CompanyID,
+		apiKey.ID, apiKey.UserID,
 		apiKey.Name, apiKey.Description, apiKey.ScopedPermissions, apiKey.IPWhitelist,
 		apiKey.RateLimit, apiKey.RateLimitWindow, apiKey.UpdatedAt, apiKey.UpdatedBy,
 	)
@@ -191,16 +191,16 @@ func (r *ApiKeyRepository) Update(ctx context.Context, apiKey *domain.ApiKey) er
 	return nil
 }
 
-// Revoke revokes an API key
-func (r *ApiKeyRepository) Revoke(ctx context.Context, id, companyID, revokedBy string, reason *string) error {
+// Revoke revokes an API key owned by userID
+func (r *ApiKeyRepository) Revoke(ctx context.Context, id, userID, revokedBy string, reason *string) error {
 	query := `
 		UPDATE core.api_keys
 		SET revoked_at = $3, revoked_by = $4, revoke_reason = $5, updated_at = $3, updated_by = $4
-		WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL AND revoked_at IS NULL
+		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND revoked_at IS NULL
 	`
 
 	now := time.Now()
-	result, err := r.db.Exec(ctx, query, id, companyID, now, revokedBy, reason)
+	result, err := r.db.Exec(ctx, query, id, userID, now, revokedBy, reason)
 
 	if err != nil {
 		logger.Error("Failed to revoke API key", logger.Err(err))
@@ -214,16 +214,16 @@ func (r *ApiKeyRepository) Revoke(ctx context.Context, id, companyID, revokedBy 
 	return nil
 }
 
-// Delete soft deletes an API key
-func (r *ApiKeyRepository) Delete(ctx context.Context, id, companyID, deletedBy string) error {
+// Delete soft deletes an API key owned by userID
+func (r *ApiKeyRepository) Delete(ctx context.Context, id, userID, deletedBy string) error {
 	query := `
 		UPDATE core.api_keys
 		SET deleted_at = $3, deleted_by = $4
-		WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL
+		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
 	`
 
 	now := time.Now()
-	result, err := r.db.Exec(ctx, query, id, companyID, now, deletedBy)
+	result, err := r.db.Exec(ctx, query, id, userID, now, deletedBy)
 
 	if err != nil {
 		logger.Error("Failed to delete API key", logger.Err(err))
@@ -276,7 +276,7 @@ func (r *ApiKeyRepository) scanSingleRow(row pgx.Row) (*domain.ApiKey, error) {
 	var environment string
 
 	err := row.Scan(
-		&apiKey.ID, &apiKey.UserID, &apiKey.CompanyID, &apiKey.KeyID, &apiKey.SecretHash, &apiKey.KeyPrefix,
+		&apiKey.ID, &apiKey.UserID, &apiKey.KeyID, &apiKey.SecretHash, &apiKey.KeyPrefix,
 		&apiKey.Name, &apiKey.Description, &environment, &apiKey.ScopedPermissions, &apiKey.IPWhitelist,
 		&apiKey.RateLimit, &apiKey.RateLimitWindow, &apiKey.ExpiresAt, &apiKey.RevokedAt, &apiKey.RevokedBy,
 		&apiKey.RevokeReason, &apiKey.LastUsedAt, &apiKey.LastUsedIP, &apiKey.TotalRequests,
@@ -297,7 +297,7 @@ func (r *ApiKeyRepository) scanRow(rows pgx.Rows) (*domain.ApiKey, error) {
 	var environment string
 
 	err := rows.Scan(
-		&apiKey.ID, &apiKey.UserID, &apiKey.CompanyID, &apiKey.KeyID, &apiKey.SecretHash, &apiKey.KeyPrefix,
+		&apiKey.ID, &apiKey.UserID, &apiKey.KeyID, &apiKey.SecretHash, &apiKey.KeyPrefix,
 		&apiKey.Name, &apiKey.Description, &environment, &apiKey.ScopedPermissions, &apiKey.IPWhitelist,
 		&apiKey.RateLimit, &apiKey.RateLimitWindow, &apiKey.ExpiresAt, &apiKey.RevokedAt, &apiKey.RevokedBy,
 		&apiKey.RevokeReason, &apiKey.LastUsedAt, &apiKey.LastUsedIP, &apiKey.TotalRequests,

@@ -6,16 +6,13 @@
 //     pushed token sizes past 4 KB on users with many permissions, which
 //     tripped ingress / CDN header limits and forced a full token
 //     regenerate on every revoke.
-//   - Keeping permissions in Redis (keyed by user_id + company_id) lets
+//   - Keeping permissions in Redis (keyed by user_id) lets
 //     the JWT stay small and lets admin-side changes (role edits, role
 //     assignments) take effect on the next request after invalidation
 //     rather than after the JWT expires.
 //
 // Cache invariants:
-//   - Key: perms:user:<user_id>:company:<company_id|->
-//     (the literal "-" stands in for "no company context yet" so tokens
-//     minted before switch-company don't collide with tokens scoped to a
-//     real company).
+//   - Key: perms:user:<user_id>
 //   - Value: JSON array of permission codes (e.g. ["finance.contacts:read"]).
 //   - TTL: driven by config.Redis.PermissionTTL.
 //   - Empty permission sets are cached too — they represent a valid
@@ -29,7 +26,7 @@ import (
 	"fmt"
 	"time"
 
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/pkg/logger"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -39,7 +36,7 @@ import (
 // accept an interface so the authz package stays decoupled from the
 // rest of the role module and is trivial to fake in tests.
 type PermissionFetcher interface {
-	GetUserPermissions(ctx context.Context, userID string, companyID *string) ([]string, error)
+	GetUserPermissions(ctx context.Context, userID string) ([]string, error)
 }
 
 // Service is the cached permission lookup. Construct via NewService and
@@ -61,30 +58,23 @@ func NewService(redis *goredis.Client, fetcher PermissionFetcher, ttl time.Durat
 	}
 }
 
-// cacheKey encodes the (user, company) scope. Company is optional because
-// some tokens (e.g. the freshly-minted post-signin token, before the user
-// has picked a tenant) carry no company_id. We still want to cache the
-// "no-company" set separately from each company-scoped set.
-func cacheKey(userID, companyID string) string {
-	if companyID == "" {
-		companyID = "-"
-	}
-	return fmt.Sprintf("perms:user:%s:company:%s", userID, companyID)
+// cacheKey encodes the per-user cache entry.
+func cacheKey(userID string) string {
+	return fmt.Sprintf("perms:user:%s", userID)
 }
 
-// GetPermissions returns the effective permission codes for (userID,
-// companyID). Cache-first; on miss it falls back to the fetcher and
-// populates Redis.
+// GetPermissions returns the effective permission codes for userID.
+// Cache-first; on miss it falls back to the fetcher and populates Redis.
 //
 // Redis errors are swallowed (not fatal): if Redis is down we still
 // answer correctly from the DB, we just lose the speed-up. That keeps
 // an outage in the cache layer from cascading into an auth outage.
-func (s *Service) GetPermissions(ctx context.Context, userID, companyID string) ([]string, error) {
+func (s *Service) GetPermissions(ctx context.Context, userID string) ([]string, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("authz: empty userID")
 	}
 
-	key := cacheKey(userID, companyID)
+	key := cacheKey(userID)
 
 	// 1. Try cache.
 	if raw, err := s.redis.Get(ctx, key).Bytes(); err == nil {
@@ -100,11 +90,7 @@ func (s *Service) GetPermissions(ctx context.Context, userID, companyID string) 
 	}
 
 	// 2. Cache miss → fetch from DB.
-	var cid *string
-	if companyID != "" {
-		cid = &companyID
-	}
-	perms, err := s.fetcher.GetUserPermissions(ctx, userID, cid)
+	perms, err := s.fetcher.GetUserPermissions(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("authz: fetch user permissions: %w", err)
 	}
@@ -124,8 +110,8 @@ func (s *Service) GetPermissions(ctx context.Context, userID, companyID string) 
 }
 
 // Has is a convenience predicate over GetPermissions.
-func (s *Service) Has(ctx context.Context, userID, companyID, permission string) (bool, error) {
-	perms, err := s.GetPermissions(ctx, userID, companyID)
+func (s *Service) Has(ctx context.Context, userID, permission string) (bool, error) {
+	perms, err := s.GetPermissions(ctx, userID)
 	if err != nil {
 		return false, err
 	}
@@ -138,8 +124,8 @@ func (s *Service) Has(ctx context.Context, userID, companyID, permission string)
 }
 
 // HasAny returns true if the user has at least one of the given permissions.
-func (s *Service) HasAny(ctx context.Context, userID, companyID string, permissions ...string) (bool, error) {
-	perms, err := s.GetPermissions(ctx, userID, companyID)
+func (s *Service) HasAny(ctx context.Context, userID string, permissions ...string) (bool, error) {
+	perms, err := s.GetPermissions(ctx, userID)
 	if err != nil {
 		return false, err
 	}
@@ -156,8 +142,8 @@ func (s *Service) HasAny(ctx context.Context, userID, companyID string, permissi
 }
 
 // HasAll returns true only if every required permission is present.
-func (s *Service) HasAll(ctx context.Context, userID, companyID string, permissions ...string) (bool, error) {
-	perms, err := s.GetPermissions(ctx, userID, companyID)
+func (s *Service) HasAll(ctx context.Context, userID string, permissions ...string) (bool, error) {
+	perms, err := s.GetPermissions(ctx, userID)
 	if err != nil {
 		return false, err
 	}
@@ -173,17 +159,10 @@ func (s *Service) HasAll(ctx context.Context, userID, companyID string, permissi
 	return true, nil
 }
 
-// InvalidateUser removes every cached permission set for a user (across
-// all companies they've signed into). Call this when the user's role
-// assignments change.
+// InvalidateUser removes the cached permission set for a user. Call this
+// when the user's role assignments change.
 func (s *Service) InvalidateUser(ctx context.Context, userID string) error {
-	return s.deleteByPattern(ctx, fmt.Sprintf("perms:user:%s:company:*", userID))
-}
-
-// InvalidateUserCompany removes a single (user, company) cache entry.
-// Cheaper than InvalidateUser when you know the exact scope.
-func (s *Service) InvalidateUserCompany(ctx context.Context, userID, companyID string) error {
-	return s.redis.Del(ctx, cacheKey(userID, companyID)).Err()
+	return s.redis.Del(ctx, cacheKey(userID)).Err()
 }
 
 // InvalidateAll nukes every cached permission set. Call this when a
@@ -196,7 +175,7 @@ func (s *Service) InvalidateAll(ctx context.Context) error {
 
 // deleteByPattern iterates keys matching pattern in batches via SCAN
 // (never KEYS — that's O(N) blocking on the whole keyspace) and DELs
-// them. Safe to run on a multi-tenant Redis.
+// them. Safe to run on a shared Redis.
 func (s *Service) deleteByPattern(ctx context.Context, pattern string) error {
 	var cursor uint64
 	for {

@@ -1,4 +1,4 @@
-module venturo-skeleton-go
+module venturo-skeleton-go-simple
 
 go 1.26.1
 

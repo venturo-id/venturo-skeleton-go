@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"strings"
 
-	"venturo-skeleton-go/internal/shared/response"
-	jwtpkg "venturo-skeleton-go/pkg/jwt"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/internal/shared/response"
+	jwtpkg "venturo-skeleton-go-simple/pkg/jwt"
+	"venturo-skeleton-go-simple/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 )

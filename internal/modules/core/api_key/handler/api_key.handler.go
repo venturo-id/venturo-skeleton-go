@@ -6,10 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"venturo-skeleton-go/internal/middleware"
-	"venturo-skeleton-go/internal/modules/core/api_key/dto"
-	"venturo-skeleton-go/internal/modules/core/api_key/service"
-	"venturo-skeleton-go/internal/shared/response"
+	"venturo-skeleton-go-simple/internal/middleware"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key/dto"
+	"venturo-skeleton-go-simple/internal/modules/core/api_key/service"
+	"venturo-skeleton-go-simple/internal/shared/response"
 )
 
 type ApiKeyHandler struct {
@@ -33,13 +33,7 @@ func (h *ApiKeyHandler) Create(c *gin.Context) {
 		return
 	}
 
-	companyID := middleware.GetCompanyID(c)
-	if companyID == "" {
-		response.Error(c, http.StatusForbidden, "Company context required", "Please switch to a company first")
-		return
-	}
-
-	result, err := h.apiKeyService.Create(c.Request.Context(), &req, userID, companyID, userID)
+	result, err := h.apiKeyService.Create(c.Request.Context(), &req, userID, userID)
 	if err != nil {
 		h.handleError(c, err)
 		return
@@ -61,13 +55,7 @@ func (h *ApiKeyHandler) List(c *gin.Context) {
 		return
 	}
 
-	companyID := middleware.GetCompanyID(c)
-	if companyID == "" {
-		response.Error(c, http.StatusForbidden, "Company context required", "Please switch to a company first")
-		return
-	}
-
-	result, err := h.apiKeyService.List(c.Request.Context(), userID, companyID, &params)
+	result, err := h.apiKeyService.List(c.Request.Context(), userID, &params)
 	if err != nil {
 		h.handleError(c, err)
 		return
@@ -79,13 +67,13 @@ func (h *ApiKeyHandler) List(c *gin.Context) {
 func (h *ApiKeyHandler) GetByID(c *gin.Context) {
 	id := c.Param("id")
 
-	companyID := middleware.GetCompanyID(c)
-	if companyID == "" {
-		response.Error(c, http.StatusForbidden, "Company context required", "Please switch to a company first")
+	userID, err := middleware.GetUserID(c)
+	if err != nil {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized", err.Error())
 		return
 	}
 
-	result, err := h.apiKeyService.GetByID(c.Request.Context(), id, companyID)
+	result, err := h.apiKeyService.GetByID(c.Request.Context(), id, userID)
 	if err != nil {
 		h.handleError(c, err)
 		return
@@ -109,13 +97,7 @@ func (h *ApiKeyHandler) Update(c *gin.Context) {
 		return
 	}
 
-	companyID := middleware.GetCompanyID(c)
-	if companyID == "" {
-		response.Error(c, http.StatusForbidden, "Company context required", "Please switch to a company first")
-		return
-	}
-
-	result, err := h.apiKeyService.Update(c.Request.Context(), id, companyID, userID, &req)
+	result, err := h.apiKeyService.Update(c.Request.Context(), id, userID, &req)
 	if err != nil {
 		h.handleError(c, err)
 		return
@@ -137,13 +119,7 @@ func (h *ApiKeyHandler) Revoke(c *gin.Context) {
 		return
 	}
 
-	companyID := middleware.GetCompanyID(c)
-	if companyID == "" {
-		response.Error(c, http.StatusForbidden, "Company context required", "Please switch to a company first")
-		return
-	}
-
-	if err := h.apiKeyService.Revoke(c.Request.Context(), id, companyID, userID, &req); err != nil {
+	if err := h.apiKeyService.Revoke(c.Request.Context(), id, userID, &req); err != nil {
 		h.handleError(c, err)
 		return
 	}

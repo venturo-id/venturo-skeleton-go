@@ -39,7 +39,7 @@ type VerifiedToken struct {
 	// tokens.
 	EmailVerified bool
 	// Name is the user's full name from the provider. Used to seed
-	// core.users.full_name and the auto-provisioned company name.
+	// core.users.full_name.
 	Name string
 	// Picture is the avatar URL from the provider.
 	Picture string

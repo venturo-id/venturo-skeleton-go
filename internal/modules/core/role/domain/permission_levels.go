@@ -15,7 +15,7 @@ const (
 var LevelActions = map[PermissionLevel][]string{
 	LevelViewer: {"read"},
 	LevelEditor: {"create", "read", "update", "delete"},
-	LevelAdmin:  {"create", "read", "update", "delete", "export", "import", "restore", "approve"},
+	LevelAdmin:  {"create", "read", "update", "delete", "export", "import", "restore"},
 }
 
 // ValidLevels is the list of all valid permission levels

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Tuai Backend is a multi-tenant business management platform built with Go 1.25, Gin web framework, and PostgreSQL. It features a modular monolithic architecture with role-based access control (RBAC).
+Tuai Backend is a single-tenant business management platform built with Go 1.25, Gin web framework, and PostgreSQL. It features a modular monolithic architecture with role-based access control (RBAC). There is no client/company/branch tenancy layer — access is governed only by global roles.
 
 ## Development Commands
 
@@ -73,18 +73,16 @@ Each `main.{module}.go` exports:
 
 Routes are organized by domain and version:
 
-- **Core**: `/core/v1/...` (auth, users, companies, roles, branches, approvals, translation overrides, API keys)
+- **Core**: `/core/v1/...` (auth, users, roles, API keys)
 
 All modules are initialized in [internal/router/router.go](internal/router/router.go).
 
-### Multi-Tenancy Pattern
+### Access Model
 
-Company-based data isolation:
-
-1. **JWT Claims** include `company_id` after user switches company
-2. **Middleware Chain**: `JWTAuth()` → `CompanyContext()` → `RequirePermission()`
-3. **Repository Pattern**: Always filter by `company_id` in WHERE clauses
-4. **Company Switching**: `POST /core/v1/auth/switch-company`
+1. **Middleware Chain**: `JWTAuth()` → `RequirePermission()`
+2. **Roles are global**: assigned in `core.user_roles`; a user's effective permissions are the merged permissions of all their active roles
+3. **Permission cache**: effective permissions live in Redis per user (`perms:user:<user_id>`, see [internal/shared/authz/](internal/shared/authz/)); invalidate it whenever a role or a role assignment changes
+4. **New users start with no role**: signup (email or Google) grants zero permissions until a super_admin assigns a role
 
 ### RBAC Middleware
 
@@ -105,11 +103,10 @@ middleware.RequireAllPermissions("users:read", "users:write")    // Has all
 
 1. **Sign Up**: `POST /core/v1/auth/signup`
 2. **Sign In**: `POST /core/v1/auth/signin` → Returns access + refresh tokens
-3. **Switch Company**: `POST /core/v1/auth/switch-company` → New JWT with company_id
-4. **Refresh Token**: `POST /core/v1/auth/refresh` → New access token
-5. **Logout**: `POST /core/v1/auth/logout` or `POST /core/v1/auth/logout-all`
+3. **Refresh Token**: `POST /core/v1/auth/refresh` → New access token
+4. **Logout**: `POST /core/v1/auth/logout` or `POST /core/v1/auth/logout-all`
 
-JWT claims include: `user_id`, `email`, `company_id`, `roles`, `permissions`
+JWT claims include: `user_id`, `email`, `username`, `full_name`, `is_super_admin`, `roles` (permissions are looked up from Redis, not embedded)
 
 ## Adding New Features
 
@@ -128,8 +125,7 @@ make migrate-create NAME=create_customers_table MODULE=core
 
 Migration conventions:
 
-- Include `company_id UUID NOT NULL` for multi-tenant tables
-- Add indexes on `company_id` and foreign keys
+- Add indexes on foreign keys
 - Use `TIMESTAMP WITH TIME ZONE` for timestamps (stored in UTC)
 - Use `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
 
@@ -167,17 +163,6 @@ type CreateUserRequest struct {
 
 Custom validators in [pkg/validator/](pkg/validator/).
 
-### Company Context in Repositories
-
-Always filter by company_id for multi-tenant data:
-
-```go
-func (r *Repository) GetByID(ctx context.Context, id, companyID string) (*domain.Entity, error) {
-    query := `SELECT * FROM table WHERE id = $1 AND company_id = $2`
-    // ...
-}
-```
-
 ## Common Gotchas
 
 ### Migration Issues
@@ -186,11 +171,11 @@ func (r *Repository) GetByID(ctx context.Context, id, companyID string) (*domain
 - Use `make migrate-force V=X MODULE=core` to force version if stuck
 - Core migrations live under `internal/database/migrations/core` and are tracked in `schema_migrations_core`
 
-### Multi-Tenancy
+### Access Control
 
-- User must switch company to get `company_id` in JWT
-- Always filter by `company_id` in repository queries
-- Use `CompanyContext()` middleware for tenant-isolated endpoints
+- Every non-public list/read endpoint needs its own `RequirePermission(...)` — there is no tenant scope to hide data
+- Records owned by one user (e.g. API keys) must be filtered by `user_id` in the repository
+- Changing a role's permissions or a user's roles must invalidate the authz cache (`InvalidateAll` / `InvalidateUser`)
 
 ### Hot Reload (Air)
 

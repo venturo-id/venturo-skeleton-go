@@ -3,11 +3,11 @@ package main
 import (
 	"time"
 
-	"venturo-skeleton-go/internal/config"
-	"venturo-skeleton-go/internal/database"
-	"venturo-skeleton-go/internal/router"
-	"venturo-skeleton-go/pkg/jwt"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/internal/config"
+	"venturo-skeleton-go-simple/internal/database"
+	"venturo-skeleton-go-simple/internal/router"
+	"venturo-skeleton-go-simple/pkg/jwt"
+	"venturo-skeleton-go-simple/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 )

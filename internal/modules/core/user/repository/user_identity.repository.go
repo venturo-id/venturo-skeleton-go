@@ -8,8 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go/internal/modules/core/user/domain"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/internal/modules/core/user/domain"
+	"venturo-skeleton-go-simple/pkg/logger"
 )
 
 // UserIdentityRepository owns reads/writes to core.user_identities.

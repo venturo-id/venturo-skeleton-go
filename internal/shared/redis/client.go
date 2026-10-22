@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"venturo-skeleton-go/internal/config"
+	"venturo-skeleton-go-simple/internal/config"
 
 	goredis "github.com/redis/go-redis/v9"
 )

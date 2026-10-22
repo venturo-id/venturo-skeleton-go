@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"venturo-skeleton-go/pkg/logger"
+	"venturo-skeleton-go-simple/pkg/logger"
 )
 
 type Database struct {

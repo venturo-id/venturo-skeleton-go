@@ -6,10 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"venturo-skeleton-go/internal/middleware"
-	"venturo-skeleton-go/internal/modules/core/role/dto"
-	"venturo-skeleton-go/internal/modules/core/role/service"
-	"venturo-skeleton-go/internal/shared/response"
+	"venturo-skeleton-go-simple/internal/middleware"
+	"venturo-skeleton-go-simple/internal/modules/core/role/dto"
+	"venturo-skeleton-go-simple/internal/modules/core/role/service"
+	"venturo-skeleton-go-simple/internal/shared/response"
 )
 
 type RoleHandler struct {
@@ -32,15 +32,9 @@ func (h *RoleHandler) GetAll(c *gin.Context) {
 	claims, _ := middleware.GetUserFromContext(c)
 	isSuperAdmin := claims != nil && claims.HasRole("super_admin")
 
-	// Non-super admin: force scope to their own company and include the global
-	// "administrator" system role (read-only). Hide "super_admin".
+	// Non-super admin: hide "super_admin" so it cannot be picked up and
+	// assigned from the role list.
 	if !isSuperAdmin {
-		companyID := middleware.GetCompanyID(c)
-		if companyID != "" {
-			params.CompanyID = &companyID
-			includeGlobal := true
-			params.IncludeGlobal = &includeGlobal
-		}
 		params.ExcludeCodes = []string{"super_admin"}
 	}
 
@@ -81,16 +75,6 @@ func (h *RoleHandler) Create(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
 		return
-	}
-
-	// Force company scope from JWT context. Non-super-admin users can only
-	// create roles within their current company. Super admin has no company
-	// context, so the created role becomes global (company_id IS NULL).
-	companyID := middleware.GetCompanyID(c)
-	if companyID != "" {
-		req.CompanyID = &companyID
-	} else {
-		req.CompanyID = nil
 	}
 
 	createdBy := middleware.MustGetUserID(c)
