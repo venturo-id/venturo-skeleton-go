@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome to Tuai</title>
+    <title>Welcome to {{.AppName}}</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -34,23 +34,15 @@
         .content {
             padding: 30px;
         }
+        /* The button is styled inline too: clients override a link's
+           color from a <style> block with their own link color. */
         .button {
             display: inline-block;
             padding: 12px 30px;
             background: #4F46E5;
-            color: #fff;
+            color: #ffffff !important;
             text-decoration: none;
             border-radius: 5px;
-            margin: 20px 0;
-        }
-        .feature-list {
-            background: #f9fafb;
-            padding: 20px;
-            border-radius: 5px;
-            margin: 20px 0;
-        }
-        .feature-list li {
-            margin: 10px 0;
         }
         .footer {
             background: #f9fafb;
@@ -74,26 +66,20 @@
             <p>Welcome aboard! We're thrilled to have you as part of the {{.AppName}} community.</p>
             <p>Your account has been successfully created and verified. You can now access all the features of our platform.</p>
 
-            <div class="feature-list">
-                <h3>What you can do now:</h3>
-                <ul>
-                    <li>✅ Manage your business operations</li>
-                    <li>✅ Track your finances and invoices</li>
-                    <li>✅ Collaborate with your team</li>
-                    <li>✅ Generate insightful reports</li>
-                </ul>
-            </div>
-
-            <div style="text-align: center;">
-                <a href="{{.AppURL}}" class="button">Get Started</a>
-            </div>
+            <table role="presentation" border="0" cellpadding="0" cellspacing="0" align="center" style="margin: 20px auto;">
+                <tr>
+                    <td align="center" bgcolor="#4F46E5" style="background-color: #4F46E5; border-radius: 5px;">
+                        <a href="{{.AppURL}}" class="button" target="_blank" style="display: inline-block; padding: 12px 30px; font-family: Arial, sans-serif; font-size: 16px; font-weight: bold; line-height: 20px; color: #ffffff; text-decoration: none; border-radius: 5px;"><span style="color: #ffffff;">Get Started</span></a>
+                    </td>
+                </tr>
+            </table>
 
             <p>If you have any questions or need assistance, our support team is here to help!</p>
             <p>Best regards,<br>The {{.AppName}} Team</p>
         </div>
         <div class="footer">
             <p>© {{.Year}} {{.AppName}}. All rights reserved.</p>
-            <p>Need help? Contact us at <a href="mailto:{{.SupportEmail}}" class="link">{{.SupportEmail}}</a></p>
+            {{if .SupportEmail}}<p>Need help? Contact us at <a href="mailto:{{.SupportEmail}}" class="link">{{.SupportEmail}}</a></p>{{end}}
         </div>
     </div>
 </body>

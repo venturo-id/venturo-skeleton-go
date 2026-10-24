@@ -4,10 +4,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go-simple/internal/middleware"
-	"venturo-skeleton-go-simple/internal/modules/core/user/handler"
-	"venturo-skeleton-go-simple/internal/modules/core/user/repository"
-	"venturo-skeleton-go-simple/internal/modules/core/user/service"
+	"timebox-be/internal/middleware"
+	"timebox-be/internal/modules/core/user/handler"
+	"timebox-be/internal/modules/core/user/repository"
+	"timebox-be/internal/modules/core/user/service"
+	"timebox-be/internal/shared/audit"
+	"timebox-be/pkg/avatar"
 )
 
 type UserModule struct {
@@ -15,14 +17,23 @@ type UserModule struct {
 	Service *service.UserService
 }
 
-// Initialize initializes the user module with all dependencies
-func Initialize(db *pgxpool.Pool) *UserModule {
-	userRepo := repository.NewUserRepository(db)
-	userService := service.NewUserService(userRepo)
-	userHandler := handler.NewUserHandler(userService)
+// Initialize initializes the user module with all dependencies. The
+// repository is built by the router, because the auth module uses it too.
+// avatars is nil when R2 is not configured: the avatar endpoints then
+// answer 503.
+func Initialize(
+	db *pgxpool.Pool,
+	userRepo *repository.UserRepository,
+	roles service.RoleLookup,
+	invalidator service.PermissionCacheInvalidator,
+	credentials service.Credentials,
+	recorder audit.Recorder,
+	avatars *avatar.Store,
+) *UserModule {
+	userService := service.NewUserService(db, userRepo, roles, invalidator, credentials, recorder, avatars)
 
 	return &UserModule{
-		Handler: userHandler,
+		Handler: handler.NewUserHandler(userService),
 		Service: userService,
 	}
 }
@@ -32,16 +43,19 @@ func (m *UserModule) SetupRoutes(router *gin.RouterGroup) {
 	users := router.Group("/users")
 	users.Use(middleware.JWTAuth())
 	{
-		// Current user endpoints (must be before /:id to avoid conflict)
+		// Current user endpoints (must be before /:id to avoid conflict).
+		// Reading the profile works with an API key; changing it does not.
 		users.GET("/me", m.Handler.GetMe)
-		users.PUT("/me", m.Handler.UpdateMe)
-		users.PUT("/me/password", m.Handler.ChangePassword)
+		users.PUT("/me", middleware.DenyAPIKeyAuth(), m.Handler.UpdateMe)
+		users.PUT("/me/password", middleware.DenyAPIKeyAuth(), m.Handler.ChangePassword)
+		users.PUT("/me/avatar", middleware.DenyAPIKeyAuth(), m.Handler.UploadAvatar)
+		users.DELETE("/me/avatar", middleware.DenyAPIKeyAuth(), m.Handler.RemoveAvatar)
 
 		// User management endpoints
-		users.GET("", middleware.RequirePermission("user-management:read"), m.Handler.GetAll)
-		users.GET("/:id", middleware.RequirePermission("user-management:read"), m.Handler.GetByID)
-		users.POST("", middleware.RequirePermission("user-management:create"), m.Handler.Create)
-		users.PUT("/:id", middleware.RequirePermission("user-management:update"), m.Handler.Update)
-		users.DELETE("/:id", middleware.RequirePermission("user-management:delete"), m.Handler.Delete)
+		users.GET("", middleware.RequirePermission("users:read"), m.Handler.GetAll)
+		users.GET("/:id", middleware.RequirePermission("users:read"), m.Handler.GetByID)
+		users.POST("", middleware.RequirePermission("users:create"), m.Handler.Create)
+		users.PUT("/:id", middleware.RequirePermission("users:update"), m.Handler.Update)
+		users.DELETE("/:id", middleware.RequirePermission("users:delete"), m.Handler.Delete)
 	}
 }

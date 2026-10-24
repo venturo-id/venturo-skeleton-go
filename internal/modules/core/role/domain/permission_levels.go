@@ -18,13 +18,26 @@ var LevelActions = map[PermissionLevel][]string{
 	LevelAdmin:  {"create", "read", "update", "delete", "export", "import", "restore"},
 }
 
-// ValidLevels is the list of all valid permission levels
+// ValidLevels is the list of all valid permission levels, lowest first.
 var ValidLevels = []PermissionLevel{LevelViewer, LevelEditor, LevelAdmin}
+
+// levelRank orders levels for Merge; unknown levels rank 0.
+var levelRank = map[PermissionLevel]int{
+	LevelViewer: 1,
+	LevelEditor: 2,
+	LevelAdmin:  3,
+}
 
 // IsValidLevel checks if a string is a valid permission level
 func IsValidLevel(level string) bool {
-	for _, l := range ValidLevels {
-		if string(l) == level {
+	_, ok := levelRank[PermissionLevel(level)]
+	return ok
+}
+
+// IsValidAction reports whether any level grants action.
+func IsValidAction(action string) bool {
+	for _, a := range LevelActions[LevelAdmin] {
+		if a == action {
 			return true
 		}
 	}
@@ -33,20 +46,5 @@ func IsValidLevel(level string) bool {
 
 // GetActionsForLevel returns the actions associated with a permission level
 func GetActionsForLevel(level string) []string {
-	actions, ok := LevelActions[PermissionLevel(level)]
-	if !ok {
-		return nil
-	}
-	return actions
-}
-
-// LevelHasAction checks if a permission level includes a specific action
-func LevelHasAction(level, action string) bool {
-	actions := GetActionsForLevel(level)
-	for _, a := range actions {
-		if a == action {
-			return true
-		}
-	}
-	return false
+	return LevelActions[PermissionLevel(level)]
 }

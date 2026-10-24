@@ -6,10 +6,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"venturo-skeleton-go-simple/internal/middleware"
-	"venturo-skeleton-go-simple/internal/modules/core/role/dto"
-	"venturo-skeleton-go-simple/internal/modules/core/role/service"
-	"venturo-skeleton-go-simple/internal/shared/response"
+	"timebox-be/internal/middleware"
+	"timebox-be/internal/modules/core/role/dto"
+	"timebox-be/internal/modules/core/role/service"
+	"timebox-be/internal/shared/request"
+	"timebox-be/internal/shared/response"
+	"timebox-be/pkg/jwt"
 )
 
 type RoleHandler struct {
@@ -24,46 +26,41 @@ func NewRoleHandler(roleService *service.RoleService) *RoleHandler {
 
 func (h *RoleHandler) GetAll(c *gin.Context) {
 	var params dto.RoleQueryParams
-	if err := c.ShouldBindQuery(&params); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid query parameters", err.Error())
+	if !request.BindQuery(c, &params) {
 		return
 	}
 
-	claims, _ := middleware.GetUserFromContext(c)
-	isSuperAdmin := claims != nil && claims.HasRole("super_admin")
-
 	// Non-super admin: hide "super_admin" so it cannot be picked up and
 	// assigned from the role list.
-	if !isSuperAdmin {
-		params.ExcludeCodes = []string{"super_admin"}
+	if !middleware.IsSuperAdmin(c) {
+		params.ExcludeCodes = []string{jwt.RoleSuperAdmin}
 	}
 
-	ctx := c.Request.Context()
-	result, err := h.roleService.GetAll(ctx, &params)
+	roles, total, err := h.roleService.List(c.Request.Context(), &params)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "Failed to get roles", err.Error())
+		h.handleError(c, err, "Failed to get roles")
 		return
 	}
 
 	response.SuccessWithPagination(c, http.StatusOK, "Roles retrieved successfully",
-		result.Roles, result.Page, result.Limit, result.Total)
+		roles, params.Page, params.Limit, total)
+}
+
+// GetPermissionCatalog lists the resources and levels a role can grant,
+// for role editors.
+func (h *RoleHandler) GetPermissionCatalog(c *gin.Context) {
+	response.Success(c, http.StatusOK, "Permission catalog retrieved successfully", h.roleService.PermissionCatalog())
 }
 
 func (h *RoleHandler) GetByID(c *gin.Context) {
-	id := c.Param("id")
-	if id == "" {
-		response.Error(c, http.StatusBadRequest, "Role ID is required", "")
+	id, ok := request.UUIDParam(c, "id")
+	if !ok {
 		return
 	}
 
-	ctx := c.Request.Context()
-	result, err := h.roleService.GetByID(ctx, id)
+	result, err := h.roleService.GetByID(c.Request.Context(), id)
 	if err != nil {
-		if errors.Is(err, service.ErrRoleNotFound) {
-			response.Error(c, http.StatusNotFound, "Role not found", "")
-			return
-		}
-		response.Error(c, http.StatusInternalServerError, "Failed to get role", err.Error())
+		h.handleError(c, err, "Failed to get role")
 		return
 	}
 
@@ -72,24 +69,13 @@ func (h *RoleHandler) GetByID(c *gin.Context) {
 
 func (h *RoleHandler) Create(c *gin.Context) {
 	var req dto.CreateRoleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+	if !request.BindJSON(c, &req) {
 		return
 	}
 
-	createdBy := middleware.MustGetUserID(c)
-	ctx := c.Request.Context()
-
-	result, err := h.roleService.Create(ctx, &req, createdBy)
+	result, err := h.roleService.Create(c.Request.Context(), &req, middleware.MustGetUserID(c), middleware.Caller(c))
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrCodeAlreadyExists):
-			response.Error(c, http.StatusConflict, "Role code already exists", "")
-		case errors.Is(err, service.ErrInvalidPermissions):
-			response.Error(c, http.StatusBadRequest, "Invalid permissions format", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to create role", err.Error())
-		}
+		h.handleError(c, err, "Failed to create role")
 		return
 	}
 
@@ -97,35 +83,19 @@ func (h *RoleHandler) Create(c *gin.Context) {
 }
 
 func (h *RoleHandler) Update(c *gin.Context) {
-	id := c.Param("id")
-	if id == "" {
-		response.Error(c, http.StatusBadRequest, "Role ID is required", "")
+	id, ok := request.UUIDParam(c, "id")
+	if !ok {
 		return
 	}
 
 	var req dto.UpdateRoleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+	if !request.BindJSON(c, &req) {
 		return
 	}
 
-	updatedBy := middleware.MustGetUserID(c)
-	claims, _ := middleware.GetUserFromContext(c)
-	isSuperAdmin := claims != nil && claims.HasRole("super_admin")
-	ctx := c.Request.Context()
-
-	result, err := h.roleService.Update(ctx, id, &req, updatedBy, isSuperAdmin)
+	result, err := h.roleService.Update(c.Request.Context(), id, &req, middleware.MustGetUserID(c), middleware.Caller(c))
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrRoleNotFound):
-			response.Error(c, http.StatusNotFound, "Role not found", "")
-		case errors.Is(err, service.ErrCannotModifySystem):
-			response.Error(c, http.StatusForbidden, "Cannot modify system role", "")
-		case errors.Is(err, service.ErrInvalidPermissions):
-			response.Error(c, http.StatusBadRequest, "Invalid permissions format", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to update role", err.Error())
-		}
+		h.handleError(c, err, "Failed to update role")
 		return
 	}
 
@@ -133,35 +103,19 @@ func (h *RoleHandler) Update(c *gin.Context) {
 }
 
 func (h *RoleHandler) UpdatePermissions(c *gin.Context) {
-	id := c.Param("id")
-	if id == "" {
-		response.Error(c, http.StatusBadRequest, "Role ID is required", "")
+	id, ok := request.UUIDParam(c, "id")
+	if !ok {
 		return
 	}
 
 	var req dto.UpdatePermissionsRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request payload", err.Error())
+	if !request.BindJSON(c, &req) {
 		return
 	}
 
-	updatedBy := middleware.MustGetUserID(c)
-	claims, _ := middleware.GetUserFromContext(c)
-	isSuperAdmin := claims != nil && claims.HasRole("super_admin")
-	ctx := c.Request.Context()
-
-	result, err := h.roleService.UpdatePermissions(ctx, id, &req, updatedBy, isSuperAdmin)
+	result, err := h.roleService.UpdatePermissions(c.Request.Context(), id, &req, middleware.MustGetUserID(c), middleware.Caller(c))
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrRoleNotFound):
-			response.Error(c, http.StatusNotFound, "Role not found", "")
-		case errors.Is(err, service.ErrCannotModifySystem):
-			response.Error(c, http.StatusForbidden, "Cannot modify system role", "")
-		case errors.Is(err, service.ErrInvalidPermissions):
-			response.Error(c, http.StatusBadRequest, "Invalid permissions format", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to update permissions", err.Error())
-		}
+		h.handleError(c, err, "Failed to update permissions")
 		return
 	}
 
@@ -169,27 +123,39 @@ func (h *RoleHandler) UpdatePermissions(c *gin.Context) {
 }
 
 func (h *RoleHandler) Delete(c *gin.Context) {
-	id := c.Param("id")
-	if id == "" {
-		response.Error(c, http.StatusBadRequest, "Role ID is required", "")
+	id, ok := request.UUIDParam(c, "id")
+	if !ok {
 		return
 	}
 
-	deletedBy := middleware.MustGetUserID(c)
-	ctx := c.Request.Context()
-
-	err := h.roleService.Delete(ctx, id, deletedBy)
-	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrRoleNotFound):
-			response.Error(c, http.StatusNotFound, "Role not found", "")
-		case errors.Is(err, service.ErrCannotDeleteSystem):
-			response.Error(c, http.StatusForbidden, "Cannot delete system role", "")
-		default:
-			response.Error(c, http.StatusInternalServerError, "Failed to delete role", err.Error())
-		}
+	if err := h.roleService.Delete(c.Request.Context(), id, middleware.MustGetUserID(c), middleware.Caller(c)); err != nil {
+		h.handleError(c, err, "Failed to delete role")
 		return
 	}
 
 	response.Success(c, http.StatusOK, "Role deleted successfully", nil)
+}
+
+// handleError maps service errors to responses. Anything unexpected is a
+// 500 carrying only fallback.
+func (h *RoleHandler) handleError(c *gin.Context, err error, fallback string) {
+	switch {
+	case errors.Is(err, service.ErrRoleNotFound):
+		response.Error(c, http.StatusNotFound, "Role not found", "")
+	case errors.Is(err, service.ErrCodeAlreadyExists):
+		response.Error(c, http.StatusConflict, "Role code already exists", "")
+	case errors.Is(err, service.ErrInvalidPermissions):
+		// The message is built by the service from the request alone.
+		response.Error(c, http.StatusBadRequest, "Invalid permissions", err.Error())
+	case errors.Is(err, service.ErrCannotModifySystem):
+		response.Error(c, http.StatusForbidden, "Cannot modify system role", "")
+	case errors.Is(err, service.ErrCannotDeleteSystem):
+		response.Error(c, http.StatusForbidden, "Cannot delete system role", "")
+	case errors.Is(err, service.ErrSuperAdminRoleLocked):
+		response.Error(c, http.StatusForbidden, "The super_admin role cannot be deactivated or given permissions", "")
+	case errors.Is(err, service.ErrExceedsCaller):
+		response.Error(c, http.StatusForbidden, "Role grants permissions you do not hold", "")
+	default:
+		response.InternalError(c, fallback, err)
+	}
 }

@@ -1,5 +1,5 @@
 ---
-title: Timebox BE — skema core (migrations 000001–000005)
+title: Timebox BE — skema core (migrations 000001–000011)
 config:
   layout: elk
   theme: neutral
@@ -19,18 +19,20 @@ erDiagram
     %% ─── Identity & auth ───────────────────────────────────────
     users {
         uuid id PK
-        varchar(255) email UK "unik selama belum soft-delete"
-        varchar(100) username UK "unik selama belum soft-delete"
+        varchar(255) email UK "lowercase (CHECK); unik selama belum soft-delete"
+        varchar(100) username UK "lowercase (CHECK); unik selama belum soft-delete"
         varchar(255) password_hash "NULL untuk user Google-only"
         varchar(255) full_name
         varchar(20) phone
         varchar(500) avatar_url
+        varchar(64) timezone "zona IANA, default Asia/Jakarta; waktu tetap disimpan UTC"
         bool is_active
         bool is_email_verified
         timestamptz email_verified_at
         int failed_login_count
         timestamptz locked_until
         timestamptz last_login_at
+        timestamptz tokens_valid_after "access token terbit sebelum ini ditolak; NULL = belum pernah"
         audit standard_columns
     }
 
@@ -41,8 +43,24 @@ erDiagram
         jsonb device_info
         varchar(45) ip_address
         timestamptz expires_at
-        timestamptz revoked_at "diisi saat logout"
+        timestamptz revoked_at "diisi saat logout atau rotasi"
         timestamptz last_used_at
+        timestamptz created_at
+        uuid rotated_from_id FK "token yang digantikan saat refresh"
+        uuid session_id "sesi; tetap saat rotasi, dibawa access token sebagai sid"
+        timestamptz signed_in_at "awal sesi; tetap saat rotasi"
+    }
+
+    account_tokens {
+        uuid id PK
+        uuid user_id FK
+        varchar(32) purpose "verify_email, reset_password, change_email, reset_grant (CHECK)"
+        varchar(64) token_hash UK "kode: HMAC-SHA256(id+kode); reset_grant: SHA-256"
+        varchar(255) email "alamat akun saat token dibuat; token batal kalau email user berubah"
+        varchar(255) new_email "change_email saja: alamat baru, tujuan kode"
+        smallint attempts "tebakan kode yang salah; mati di OTP_MAX_ATTEMPTS"
+        timestamptz expires_at
+        timestamptz used_at "diisi saat dipakai atau diganti kode baru"
         timestamptz created_at
     }
 
@@ -50,7 +68,7 @@ erDiagram
         uuid id PK
         uuid user_id FK
         varchar(32) provider UK "google, apple, microsoft"
-        varchar(255) provider_user_id UK "Firebase UID; UK bersama provider"
+        varchar(255) provider_user_id UK "Google: sub akun Google; UK bersama provider"
         varchar(255) email
         jsonb raw_profile
         timestamptz last_login_at
@@ -61,14 +79,14 @@ erDiagram
     api_keys {
         uuid id PK
         uuid user_id FK
-        varchar(16) key_id UK
+        varchar(16) key_id UK "bagian ke-3 key, mis. abc12345 di tbx_live_abc12345_..."
         varchar(64) secret_hash UK "SHA256"
-        varchar(50) key_prefix
+        varchar(50) key_prefix "tampilan, mis. tbx_live_abc12345_a1b2..."
         varchar(100) name
         text description
         api_key_environment environment "enum: live, test"
-        jsonb scoped_permissions "kosong = warisi semua"
-        text[] ip_whitelist "NULL = semua IP"
+        jsonb scoped_permissions "minimal satu; diirisan dengan izin pemilik saat request"
+        text[] ip_whitelist "NULL / kosong = semua IP"
         int rate_limit
         int rate_limit_window "detik"
         timestamptz expires_at
@@ -87,8 +105,8 @@ erDiagram
         varchar(50) code UK "unik selama belum soft-delete"
         varchar(100) name
         text description
-        jsonb permissions "resource ke viewer, editor, admin"
-        bool is_system "tidak bisa diubah"
+        jsonb permissions "resource terdaftar → level: viewer, editor, admin"
+        bool is_system "super_admin, administrator: tak bisa dihapus, hanya super admin yang mengubah"
         bool is_active
         audit standard_columns
     }
@@ -102,6 +120,8 @@ erDiagram
 
     %% ─── Relasi: FK constraint ─────────────────────────────────
     users            ||--o{ refresh_tokens          : "user_id"
+    refresh_tokens   |o--o| refresh_tokens          : "rotated_from_id"
+    users            ||--o{ account_tokens          : "user_id"
     users            ||--o{ user_identities         : "user_id"
     users            ||--o{ api_keys                : "user_id"
     users            |o--o{ api_keys                : "revoked_by"
@@ -113,5 +133,5 @@ erDiagram
     classDef identity fill:#dbeafe,stroke:#1d4ed8
     classDef rbac     fill:#ffedd5,stroke:#c2410c
 
-    class users,refresh_tokens,user_identities,api_keys identity
+    class users,refresh_tokens,account_tokens,user_identities,api_keys identity
     class roles,user_roles rbac

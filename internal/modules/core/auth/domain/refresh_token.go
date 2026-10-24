@@ -21,19 +21,16 @@ type RefreshToken struct {
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
-}
-
-// IsExpired checks if the token is expired
-func (r *RefreshToken) IsExpired() bool {
-	return time.Now().After(r.ExpiresAt)
+	// RotatedFromID is the token this one replaced on refresh; nil for a
+	// token issued at sign-in.
+	RotatedFromID *string `json:"-"`
+	// SessionID and SignedInAt describe the sign-in session; rotation
+	// carries them over to the next token.
+	SessionID  string    `json:"session_id"`
+	SignedInAt time.Time `json:"signed_in_at"`
 }
 
 // IsRevoked checks if the token is revoked
 func (r *RefreshToken) IsRevoked() bool {
 	return r.RevokedAt != nil
-}
-
-// IsValid checks if the token is valid (not expired and not revoked)
-func (r *RefreshToken) IsValid() bool {
-	return !r.IsExpired() && !r.IsRevoked()
 }

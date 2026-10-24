@@ -8,12 +8,20 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"venturo-skeleton-go-simple/internal/modules/core/user/domain"
-	"venturo-skeleton-go-simple/internal/modules/core/user/dto"
-	"venturo-skeleton-go-simple/pkg/logger"
+	"timebox-be/internal/database"
+	"timebox-be/internal/modules/core/user/domain"
+	"timebox-be/internal/modules/core/user/dto"
+	"timebox-be/pkg/logger"
+)
+
+// Returned by Create and Update when the email or username belongs to
+// another live account. The partial unique indexes decide, so two
+// concurrent requests cannot both get through.
+var (
+	ErrEmailTaken    = errors.New("email is already in use")
+	ErrUsernameTaken = errors.New("username is already in use")
 )
 
 type UserRepository struct {
@@ -24,42 +32,76 @@ func NewUserRepository(db *pgxpool.Pool) *UserRepository {
 	return &UserRepository{db: db}
 }
 
-// Create creates a new user
+// q runs statements on the transaction carried by ctx, if any.
+func (r *UserRepository) q(ctx context.Context) database.DBTX {
+	return database.Querier(ctx, r.db)
+}
+
+// userColumns matches scanUser. A NULL password_hash (an account that
+// only signs in through an external provider) reads as "".
+const userColumns = `
+	id, email, username, COALESCE(password_hash, ''), full_name, phone, avatar_url, timezone,
+	is_active, is_email_verified, email_verified_at,
+	failed_login_count, locked_until, last_login_at,
+	created_at, created_by, updated_at, updated_by, deleted_at, deleted_by`
+
+func scanUser(row pgx.Row) (*domain.User, error) {
+	var user domain.User
+	err := row.Scan(
+		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
+		&user.FullName, &user.Phone, &user.AvatarURL, &user.Timezone,
+		&user.IsActive, &user.IsEmailVerified, &user.EmailVerifiedAt,
+		&user.FailedLoginCount, &user.LockedUntil, &user.LastLoginAt,
+		&user.CreatedAt, &user.CreatedBy, &user.UpdatedAt, &user.UpdatedBy,
+		&user.DeletedAt, &user.DeletedBy,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// translateUnique turns a violation of the email or username index into
+// ErrEmailTaken / ErrUsernameTaken.
+func translateUnique(err error) error {
+	switch constraint, _ := database.UniqueViolation(err); constraint {
+	case "users_email_active_key":
+		return ErrEmailTaken
+	case "users_username_active_key":
+		return ErrUsernameTaken
+	}
+	return err
+}
+
+// Create inserts a user. An empty PasswordHash is stored as NULL: the
+// account signs in only through an external identity provider until a
+// local password is set. An empty Timezone becomes DefaultTimezone. A
+// duplicate email or username fails with ErrEmailTaken / ErrUsernameTaken.
 func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
-	return r.createWith(ctx, r.db, user)
-}
+	if user.Timezone == "" {
+		user.Timezone = domain.DefaultTimezone
+	}
 
-// CreateTx creates a new user inside an existing transaction. Use this when
-// the caller needs to atomically create the user together with related rows
-// (e.g. core.user_roles) so a partial state cannot leak on failure.
-func (r *UserRepository) CreateTx(ctx context.Context, tx pgx.Tx, user *domain.User) error {
-	return r.createWith(ctx, tx, user)
-}
-
-// dbExec is the minimal subset of *pgxpool.Pool / pgx.Tx that we need for
-// shared write helpers. Both types satisfy this implicitly.
-type dbExec interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
-
-func (r *UserRepository) createWith(ctx context.Context, q dbExec, user *domain.User) error {
 	query := `
 		INSERT INTO core.users (
-			id, email, username, password_hash, full_name, phone, avatar_url,
-			is_active, is_email_verified, created_at, created_by, updated_at, updated_by
+			id, email, username, password_hash, full_name, phone, avatar_url, timezone,
+			is_active, is_email_verified, email_verified_at,
+			created_at, created_by, updated_at, updated_by
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+			$1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
 		)
 	`
 
-	_, err := q.Exec(ctx, query,
+	_, err := r.q(ctx).Exec(ctx, query,
 		user.ID, user.Email, user.Username, user.PasswordHash,
-		user.FullName, user.Phone, user.AvatarURL,
-		user.IsActive, user.IsEmailVerified,
+		user.FullName, user.Phone, user.AvatarURL, user.Timezone,
+		user.IsActive, user.IsEmailVerified, user.EmailVerifiedAt,
 		user.CreatedAt, user.CreatedBy, user.UpdatedAt, user.UpdatedBy,
 	)
-
 	if err != nil {
+		if err := translateUnique(err); errors.Is(err, ErrEmailTaken) || errors.Is(err, ErrUsernameTaken) {
+			return err
+		}
 		logger.Error("Failed to create user", logger.Err(err))
 		return err
 	}
@@ -67,272 +109,209 @@ func (r *UserRepository) createWith(ctx context.Context, q dbExec, user *domain.
 	return nil
 }
 
-// BeginTx exposes the underlying pool's transaction starter to higher layers
-// (e.g. UserService) that need to coordinate cross-repository writes.
-func (r *UserRepository) BeginTx(ctx context.Context) (pgx.Tx, error) {
-	return r.db.Begin(ctx)
-}
+// findOne returns the live user matching column = value, or nil.
+func (r *UserRepository) findOne(ctx context.Context, column, value string) (*domain.User, error) {
+	query := `SELECT ` + userColumns + ` FROM core.users WHERE ` + column + ` = $1 AND deleted_at IS NULL`
 
-// CreateExternal inserts a user whose authentication is delegated to an
-// external identity provider (Firebase / Google for now). password_hash
-// is forced to NULL — the user can later add a local password through a
-// separate flow, but until then SignIn with email/password must fail.
-//
-// Callers are responsible for ensuring email/username uniqueness *before*
-// invoking this; the partial unique indexes will reject duplicates
-// otherwise.
-func (r *UserRepository) CreateExternal(ctx context.Context, user *domain.User) error {
-	query := `
-		INSERT INTO core.users (
-			id, email, username, password_hash, full_name, phone, avatar_url,
-			is_active, is_email_verified, email_verified_at,
-			created_at, created_by, updated_at, updated_by
-		) VALUES (
-			$1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
-		)
-	`
-
-	_, err := r.db.Exec(ctx, query,
-		user.ID, user.Email, user.Username,
-		user.FullName, user.Phone, user.AvatarURL,
-		user.IsActive, user.IsEmailVerified, user.EmailVerifiedAt,
-		user.CreatedAt, user.CreatedBy, user.UpdatedAt, user.UpdatedBy,
-	)
+	user, err := scanUser(r.q(ctx).QueryRow(ctx, query, value))
 	if err != nil {
-		logger.Error("Failed to create external user", logger.Err(err))
-		return err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		logger.Error("Failed to find user", logger.String("by", column), logger.Err(err))
+		return nil, err
 	}
-
-	return nil
+	return user, nil
 }
 
 // FindByID finds a user by ID
 func (r *UserRepository) FindByID(ctx context.Context, id string) (*domain.User, error) {
-	query := `
-		SELECT id, email, username, COALESCE(password_hash, '') AS password_hash, full_name, phone, avatar_url,
-		       is_active, is_email_verified, email_verified_at,
-		       failed_login_count, locked_until, last_login_at,
-		       created_at, created_by, updated_at, updated_by, deleted_at, deleted_by
-		FROM core.users
-		WHERE id = $1 AND deleted_at IS NULL
-	`
+	return r.findOne(ctx, "id", id)
+}
 
-	var user domain.User
-	err := r.db.QueryRow(ctx, query, id).Scan(
-		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
-		&user.FullName, &user.Phone, &user.AvatarURL,
-		&user.IsActive, &user.IsEmailVerified, &user.EmailVerifiedAt,
-		&user.FailedLoginCount, &user.LockedUntil, &user.LastLoginAt,
-		&user.CreatedAt, &user.CreatedBy, &user.UpdatedAt, &user.UpdatedBy,
-		&user.DeletedAt, &user.DeletedBy,
-	)
+// FindByIDForUpdate finds a live user and locks the row until the
+// transaction ctx carries ends; without one the lock is gone at once.
+//
+// Everything that ends a user's sessions or changes the password updates
+// this row first, so it waits for the lock: a session issued or refreshed
+// under it is either ended by such a change or issued after it, never
+// left behind.
+func (r *UserRepository) FindByIDForUpdate(ctx context.Context, id string) (*domain.User, error) {
+	// NO KEY: inserts that reference the user (refresh tokens) need not wait.
+	query := `SELECT ` + userColumns + ` FROM core.users WHERE id = $1 AND deleted_at IS NULL FOR NO KEY UPDATE`
 
+	user, err := scanUser(r.q(ctx).QueryRow(ctx, query, id))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
-		logger.Error("Failed to find user by ID", logger.Err(err))
+		logger.Error("Failed to lock user", logger.Err(err))
 		return nil, err
 	}
-
-	return &user, nil
+	return user, nil
 }
 
-// FindByEmail finds a user by email
+// FindByEmail finds a user by (normalized) email
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
-	query := `
-		SELECT id, email, username, COALESCE(password_hash, '') AS password_hash, full_name, phone, avatar_url,
-		       is_active, is_email_verified, email_verified_at,
-		       failed_login_count, locked_until, last_login_at,
-		       created_at, created_by, updated_at, updated_by, deleted_at, deleted_by
-		FROM core.users
-		WHERE email = $1 AND deleted_at IS NULL
-	`
-
-	var user domain.User
-	err := r.db.QueryRow(ctx, query, email).Scan(
-		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
-		&user.FullName, &user.Phone, &user.AvatarURL,
-		&user.IsActive, &user.IsEmailVerified, &user.EmailVerifiedAt,
-		&user.FailedLoginCount, &user.LockedUntil, &user.LastLoginAt,
-		&user.CreatedAt, &user.CreatedBy, &user.UpdatedAt, &user.UpdatedBy,
-		&user.DeletedAt, &user.DeletedBy,
-	)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		logger.Error("Failed to find user by email", logger.Err(err))
-		return nil, err
-	}
-
-	return &user, nil
+	return r.findOne(ctx, "email", email)
 }
 
-// FindByUsername finds a user by username
+// FindByUsername finds a user by (normalized) username
 func (r *UserRepository) FindByUsername(ctx context.Context, username string) (*domain.User, error) {
-	query := `
-		SELECT id, email, username, COALESCE(password_hash, '') AS password_hash, full_name, phone, avatar_url,
-		       is_active, is_email_verified, email_verified_at,
-		       failed_login_count, locked_until, last_login_at,
-		       created_at, created_by, updated_at, updated_by, deleted_at, deleted_by
-		FROM core.users
-		WHERE username = $1 AND deleted_at IS NULL
-	`
-
-	var user domain.User
-	err := r.db.QueryRow(ctx, query, username).Scan(
-		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
-		&user.FullName, &user.Phone, &user.AvatarURL,
-		&user.IsActive, &user.IsEmailVerified, &user.EmailVerifiedAt,
-		&user.FailedLoginCount, &user.LockedUntil, &user.LastLoginAt,
-		&user.CreatedAt, &user.CreatedBy, &user.UpdatedAt, &user.UpdatedBy,
-		&user.DeletedAt, &user.DeletedBy,
-	)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		logger.Error("Failed to find user by username", logger.Err(err))
-		return nil, err
-	}
-
-	return &user, nil
+	return r.findOne(ctx, "username", username)
 }
 
-// FindByEmailOrUsername finds a user by email or username
-func (r *UserRepository) FindByEmailOrUsername(ctx context.Context, login string) (*domain.User, error) {
-	query := `
-		SELECT id, email, username, COALESCE(password_hash, '') AS password_hash, full_name, phone, avatar_url,
-		       is_active, is_email_verified, email_verified_at,
-		       failed_login_count, locked_until, last_login_at,
-		       created_at, created_by, updated_at, updated_by, deleted_at, deleted_by
-		FROM core.users
-		WHERE (email = $1 OR username = $1) AND deleted_at IS NULL
-	`
-
-	var user domain.User
-	err := r.db.QueryRow(ctx, query, login).Scan(
-		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
-		&user.FullName, &user.Phone, &user.AvatarURL,
-		&user.IsActive, &user.IsEmailVerified, &user.EmailVerifiedAt,
-		&user.FailedLoginCount, &user.LockedUntil, &user.LastLoginAt,
-		&user.CreatedAt, &user.CreatedBy, &user.UpdatedAt, &user.UpdatedBy,
-		&user.DeletedAt, &user.DeletedBy,
-	)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		logger.Error("Failed to find user by email or username", logger.Err(err))
-		return nil, err
-	}
-
-	return &user, nil
-}
-
-// FindAll finds all users with pagination and filtering
+// FindAll returns one page of live users, newest first.
 func (r *UserRepository) FindAll(ctx context.Context, params *dto.UserQueryParams) ([]domain.User, int64, error) {
-	var conditions []string
-	var args []interface{}
-	argIndex := 1
-
-	conditions = append(conditions, "u.deleted_at IS NULL")
+	conditions := []string{"deleted_at IS NULL"}
+	var args []any
 
 	if params.Search != "" {
-		conditions = append(conditions, fmt.Sprintf(
-			"(u.email ILIKE $%d OR u.username ILIKE $%d OR u.full_name ILIKE $%d)",
-			argIndex, argIndex, argIndex,
-		))
 		args = append(args, "%"+params.Search+"%")
-		argIndex++
+		n := len(args)
+		conditions = append(conditions, fmt.Sprintf(
+			"(email ILIKE $%d OR username ILIKE $%d OR full_name ILIKE $%d)", n, n, n,
+		))
 	}
 
 	if params.IsActive != nil {
-		conditions = append(conditions, fmt.Sprintf("u.is_active = $%d", argIndex))
 		args = append(args, *params.IsActive)
-		argIndex++
+		conditions = append(conditions, fmt.Sprintf("is_active = $%d", len(args)))
 	}
 
 	whereClause := strings.Join(conditions, " AND ")
 
-	// Count query
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM core.users u WHERE %s", whereClause)
 	var total int64
-	err := r.db.QueryRow(ctx, countQuery, args...).Scan(&total)
-	if err != nil {
+	countQuery := "SELECT COUNT(*) FROM core.users WHERE " + whereClause
+	if err := r.q(ctx).QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
 		logger.Error("Failed to count users", logger.Err(err))
 		return nil, 0, err
 	}
 
-	// Data query
-	offset := (params.Page - 1) * params.Limit
-	dataQuery := fmt.Sprintf(`SELECT u.id, u.email, u.username, COALESCE(u.password_hash, '') AS password_hash, u.full_name, u.phone, u.avatar_url,
-		       u.is_active, u.is_email_verified, u.email_verified_at,
-		       u.failed_login_count, u.locked_until, u.last_login_at,
-		       u.created_at, u.created_by, u.updated_at, u.updated_by, u.deleted_at, u.deleted_by
-		FROM core.users u
+	args = append(args, params.Limit, (params.Page-1)*params.Limit)
+	dataQuery := fmt.Sprintf(`
+		SELECT %s FROM core.users
 		WHERE %s
-		ORDER BY u.created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT $%d OFFSET $%d
-	`, whereClause, argIndex, argIndex+1)
+	`, userColumns, whereClause, len(args)-1, len(args))
 
-	args = append(args, params.Limit, offset)
-
-	rows, err := r.db.Query(ctx, dataQuery, args...)
+	rows, err := r.q(ctx).Query(ctx, dataQuery, args...)
 	if err != nil {
 		logger.Error("Failed to find users", logger.Err(err))
 		return nil, 0, err
 	}
 	defer rows.Close()
 
-	var users []domain.User
+	users := make([]domain.User, 0, params.Limit)
 	for rows.Next() {
-		var user domain.User
-		err := rows.Scan(
-			&user.ID, &user.Email, &user.Username, &user.PasswordHash,
-			&user.FullName, &user.Phone, &user.AvatarURL,
-			&user.IsActive, &user.IsEmailVerified, &user.EmailVerifiedAt,
-			&user.FailedLoginCount, &user.LockedUntil, &user.LastLoginAt,
-			&user.CreatedAt, &user.CreatedBy, &user.UpdatedAt, &user.UpdatedBy,
-			&user.DeletedAt, &user.DeletedBy,
-		)
+		user, err := scanUser(rows)
 		if err != nil {
 			logger.Error("Failed to scan user", logger.Err(err))
 			return nil, 0, err
 		}
-		users = append(users, user)
+		users = append(users, *user)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("Failed to read users", logger.Err(err))
+		return nil, 0, err
 	}
 
 	return users, total, nil
 }
 
-// Update updates a user
+// Update writes the fields an administrator may change. The avatar is not
+// one of them: it changes only through SetAvatar. Returns
+// database.ErrNotFound when the user does not exist (any more), and
+// ErrEmailTaken / ErrUsernameTaken on a duplicate.
 func (r *UserRepository) Update(ctx context.Context, user *domain.User) error {
 	query := `
 		UPDATE core.users
-		SET email = $2, username = $3, full_name = $4, phone = $5, avatar_url = $6,
-		    is_active = $7, updated_at = $8, updated_by = $9
+		SET email = $2, username = $3, full_name = $4, phone = $5,
+		    is_active = $6, is_email_verified = $7, email_verified_at = $8,
+		    updated_at = $9, updated_by = $10, timezone = $11
 		WHERE id = $1 AND deleted_at IS NULL
 	`
 
-	_, err := r.db.Exec(ctx, query,
-		user.ID, user.Email, user.Username, user.FullName, user.Phone, user.AvatarURL,
-		user.IsActive, user.UpdatedAt, user.UpdatedBy,
+	tag, err := r.q(ctx).Exec(ctx, query,
+		user.ID, user.Email, user.Username, user.FullName, user.Phone,
+		user.IsActive, user.IsEmailVerified, user.EmailVerifiedAt,
+		user.UpdatedAt, user.UpdatedBy, user.Timezone,
 	)
-
 	if err != nil {
+		if err := translateUnique(err); errors.Is(err, ErrEmailTaken) || errors.Is(err, ErrUsernameTaken) {
+			return err
+		}
 		logger.Error("Failed to update user", logger.Err(err))
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return database.ErrNotFound
 	}
 
 	return nil
 }
 
-// SoftDelete soft deletes a user
+// UpdateProfile changes only a user's own profile fields; a nil value
+// keeps the current one. It never touches status or login columns, so it
+// cannot undo a concurrent deactivation.
+func (r *UserRepository) UpdateProfile(ctx context.Context, id string, fullName, phone, timezone *string) error {
+	query := `
+		UPDATE core.users
+		SET full_name = COALESCE($2, full_name),
+		    phone = COALESCE($3, phone),
+		    timezone = COALESCE($4, timezone),
+		    updated_at = $5, updated_by = $1
+		WHERE id = $1 AND deleted_at IS NULL
+	`
+
+	tag, err := r.q(ctx).Exec(ctx, query, id, fullName, phone, timezone, time.Now())
+	if err != nil {
+		logger.Error("Failed to update user profile", logger.Err(err))
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return database.ErrNotFound
+	}
+
+	return nil
+}
+
+// SetAvatar sets the user's avatar URL — nil removes it — and returns the
+// one it replaced, so the caller can delete that picture. The row is
+// locked while the old value is read: of two changes racing each other,
+// the second gets back the URL the first one set, so every replaced URL is
+// returned exactly once. Returns database.ErrNotFound when the user does
+// not exist (any more).
+func (r *UserRepository) SetAvatar(ctx context.Context, id string, avatarURL *string) (previous *string, err error) {
+	// NO KEY: inserts that reference the user (refresh tokens) need not wait.
+	query := `
+		WITH old AS (
+			SELECT id, avatar_url FROM core.users
+			WHERE id = $1 AND deleted_at IS NULL
+			FOR NO KEY UPDATE
+		)
+		UPDATE core.users AS u
+		SET avatar_url = $2, updated_at = $3, updated_by = $1
+		FROM old
+		WHERE u.id = old.id
+		RETURNING old.avatar_url
+	`
+
+	err = r.q(ctx).QueryRow(ctx, query, id, avatarURL, time.Now()).Scan(&previous)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, database.ErrNotFound
+		}
+		logger.Error("Failed to set avatar", logger.Err(err))
+		return nil, err
+	}
+
+	return previous, nil
+}
+
+// SoftDelete soft deletes a user. Returns database.ErrNotFound when the
+// user does not exist (any more).
 func (r *UserRepository) SoftDelete(ctx context.Context, id, deletedBy string) error {
 	query := `
 		UPDATE core.users
@@ -340,43 +319,258 @@ func (r *UserRepository) SoftDelete(ctx context.Context, id, deletedBy string) e
 		WHERE id = $1 AND deleted_at IS NULL
 	`
 
-	now := time.Now()
-	_, err := r.db.Exec(ctx, query, id, now, deletedBy)
+	tag, err := r.q(ctx).Exec(ctx, query, id, time.Now(), deletedBy)
 	if err != nil {
 		logger.Error("Failed to soft delete user", logger.Err(err))
 		return err
 	}
+	if tag.RowsAffected() == 0 {
+		return database.ErrNotFound
+	}
 
 	return nil
 }
 
-// UpdatePassword updates user password
-func (r *UserRepository) UpdatePassword(ctx context.Context, id, passwordHash, updatedBy string) error {
+// ChangePassword replaces the password whose hash was checkedHash with
+// passwordHash: the owner chose it knowing the current one, checked as
+// password attempt number attempt. It ends the run of wrong passwords
+// like ClearPasswordAttempts. It reports false, changing nothing, when
+// another attempt has locked the account since, the password was changed
+// or reset meanwhile, or the account is inactive or gone.
+func (r *UserRepository) ChangePassword(ctx context.Context, id, checkedHash, passwordHash string, attempt int, at time.Time) (bool, error) {
 	query := `
 		UPDATE core.users
-		SET password_hash = $2, updated_at = $3, updated_by = $4
+		SET password_hash = $2, failed_login_count = 0, locked_until = NULL,
+		    updated_at = $3, updated_by = $1
+		WHERE id = $1 AND is_active AND deleted_at IS NULL AND password_hash = $5
+		  AND (locked_until IS NULL OR locked_until <= $3 OR failed_login_count = $4)
+	`
+
+	tag, err := r.q(ctx).Exec(ctx, query, id, passwordHash, at, attempt, checkedHash)
+	if err != nil {
+		logger.Error("Failed to change password", logger.Err(err))
+		return false, err
+	}
+
+	return tag.RowsAffected() == 1, nil
+}
+
+// ChangeEmail moves an active account from email to newEmail and marks
+// newEmail verified: its owner followed a link sent to it. It returns
+// database.ErrNotFound when the account's email is no longer email, and
+// ErrEmailTaken when another account uses newEmail by now.
+func (r *UserRepository) ChangeEmail(ctx context.Context, id, email, newEmail string, at time.Time) error {
+	query := `
+		UPDATE core.users
+		SET email = $3, is_email_verified = TRUE, email_verified_at = $4,
+		    updated_at = $4, updated_by = $1
+		WHERE id = $1 AND email = $2 AND is_active AND deleted_at IS NULL
+	`
+
+	tag, err := r.q(ctx).Exec(ctx, query, id, email, newEmail, at)
+	if err != nil {
+		if err := translateUnique(err); errors.Is(err, ErrEmailTaken) {
+			return err
+		}
+		logger.Error("Failed to change email", logger.Err(err))
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return database.ErrNotFound
+	}
+
+	return nil
+}
+
+// Anonymize closes an account at its owner's request: the row stays, since
+// other records refer to it, but everything about the person is erased —
+// email and username become placeholders derived from the id, and the
+// name, phone, avatar, password and login history are cleared. The account
+// is soft deleted and every access token it issued is refused. Returns
+// database.ErrNotFound when the account is gone already.
+func (r *UserRepository) Anonymize(ctx context.Context, id string, at time.Time) error {
+	query := `
+		UPDATE core.users
+		SET email = id::text || '@closed.invalid',
+		    username = 'closed-' || replace(id::text, '-', ''),
+		    password_hash = NULL, full_name = NULL, phone = NULL, avatar_url = NULL,
+		    timezone = DEFAULT,
+		    is_active = FALSE, is_email_verified = FALSE, email_verified_at = NULL,
+		    failed_login_count = 0, locked_until = NULL, last_login_at = NULL,
+		    tokens_valid_after = $2,
+		    updated_at = $2, updated_by = $1, deleted_at = $2, deleted_by = $1
 		WHERE id = $1 AND deleted_at IS NULL
 	`
 
-	_, err := r.db.Exec(ctx, query, id, passwordHash, time.Now(), updatedBy)
+	tag, err := r.q(ctx).Exec(ctx, query, id, at.Truncate(time.Millisecond))
 	if err != nil {
-		logger.Error("Failed to update password", logger.Err(err))
+		logger.Error("Failed to anonymize user", logger.Err(err))
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return database.ErrNotFound
+	}
+
+	return nil
+}
+
+// VerifyEmail marks the user's email verified, provided it is still
+// email (the address a verification link was sent to) and the account is
+// active. It reports whether the email was unverified until now.
+func (r *UserRepository) VerifyEmail(ctx context.Context, id, email string, at time.Time) (newlyVerified bool, err error) {
+	query := `
+		UPDATE core.users AS u
+		SET is_email_verified = TRUE,
+		    email_verified_at = COALESCE(u.email_verified_at, $3)
+		FROM (SELECT is_email_verified FROM core.users WHERE id = $1) AS before
+		WHERE u.id = $1 AND u.email = $2 AND u.is_active AND u.deleted_at IS NULL
+		RETURNING NOT before.is_email_verified
+	`
+
+	err = r.q(ctx).QueryRow(ctx, query, id, email, at).Scan(&newlyVerified)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, database.ErrNotFound
+		}
+		logger.Error("Failed to verify email", logger.Err(err))
+		return false, err
+	}
+
+	return newlyVerified, nil
+}
+
+// ResetPassword sets a new password after the owner proved control of the
+// mailbox email: that also verifies the email and lifts any sign-in lock.
+// Returns database.ErrNotFound when the account's email is no longer
+// email (the link went to an address the account has left), or it is
+// inactive or gone.
+func (r *UserRepository) ResetPassword(ctx context.Context, id, email, passwordHash string, at time.Time) error {
+	query := `
+		UPDATE core.users
+		SET password_hash = $2,
+		    is_email_verified = TRUE,
+		    email_verified_at = COALESCE(email_verified_at, $3),
+		    failed_login_count = 0, locked_until = NULL,
+		    updated_at = $3, updated_by = $1
+		WHERE id = $1 AND email = $4 AND is_active AND deleted_at IS NULL
+	`
+
+	tag, err := r.q(ctx).Exec(ctx, query, id, passwordHash, at, email)
+	if err != nil {
+		logger.Error("Failed to reset password", logger.Err(err))
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return database.ErrNotFound
+	}
+
+	return nil
+}
+
+// ClaimUnverified hands an unverified account to whoever just proved they
+// own its email through an external provider: the password set by the
+// registrant is removed and the email marked verified. It reports false
+// when the account is verified (or gone) by now, and leaves it untouched.
+func (r *UserRepository) ClaimUnverified(ctx context.Context, id string, at time.Time) (bool, error) {
+	query := `
+		UPDATE core.users
+		SET password_hash = NULL,
+		    is_email_verified = TRUE, email_verified_at = $2,
+		    failed_login_count = 0, locked_until = NULL,
+		    updated_at = $2
+		WHERE id = $1 AND NOT is_email_verified AND deleted_at IS NULL
+	`
+
+	tag, err := r.q(ctx).Exec(ctx, query, id, at)
+	if err != nil {
+		logger.Error("Failed to claim account", logger.Err(err))
+		return false, err
+	}
+
+	return tag.RowsAffected() == 1, nil
+}
+
+// RevokeTokensIssuedBefore makes every access token issued before at
+// invalid for this user (see authz.Subject.TokensValidAfter). The value
+// is kept at milliseconds, the precision of a token's issue time.
+func (r *UserRepository) RevokeTokensIssuedBefore(ctx context.Context, id string, at time.Time) error {
+	query := `UPDATE core.users SET tokens_valid_after = $2 WHERE id = $1`
+
+	if _, err := r.q(ctx).Exec(ctx, query, id, at.Truncate(time.Millisecond)); err != nil {
+		logger.Error("Failed to revoke access tokens", logger.Err(err))
 		return err
 	}
 
 	return nil
 }
 
-// UpdateLastLogin updates last login timestamp
-func (r *UserRepository) UpdateLastLogin(ctx context.Context, id string) error {
+// ReservePasswordAttempt counts a password check before it is made, so
+// that guesses sent in parallel cannot all be checked before a lock lands.
+// It returns the attempt's number in the current run of wrong passwords,
+// or 0 when the account is locked (or gone) and no check may be made. The
+// attempt that reaches maxAttempts locks the account until lockUntil at
+// once; if its password turns out right, ClearPasswordAttempts lifts the
+// lock again. A lock that has expired starts a new run.
+func (r *UserRepository) ReservePasswordAttempt(ctx context.Context, id string, maxAttempts int, now, lockUntil time.Time) (int, error) {
+	// SET reads the row as it was, re-read after waiting for a concurrent
+	// reservation: the attempts of a burst are numbered one by one.
 	query := `
 		UPDATE core.users
-		SET last_login_at = $2, failed_login_count = 0, locked_until = NULL
+		SET failed_login_count = CASE WHEN locked_until IS NULL THEN failed_login_count + 1 ELSE 1 END,
+		    locked_until = CASE
+		        WHEN (CASE WHEN locked_until IS NULL THEN failed_login_count + 1 ELSE 1 END) >= $3 THEN $4::timestamptz
+		    END
 		WHERE id = $1 AND deleted_at IS NULL
+		  AND (locked_until IS NULL OR locked_until <= $2)
+		RETURNING failed_login_count
 	`
 
-	_, err := r.db.Exec(ctx, query, id, time.Now())
+	var attempt int
+	err := r.q(ctx).QueryRow(ctx, query, id, now, maxAttempts, lockUntil).Scan(&attempt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
 	if err != nil {
+		logger.Error("Failed to reserve password attempt", logger.Err(err))
+		return 0, err
+	}
+
+	return attempt, nil
+}
+
+// ClearPasswordAttempts ends the run of wrong passwords after password
+// attempt number attempt was right, checked against the hash checkedHash.
+// It reports false when another attempt has locked the account since, or
+// the password was changed or reset since it was read: then the right
+// password must lose too. A lock whose count is still attempt is the one
+// this attempt set by reaching the limit, and is lifted.
+//
+// It locks the row (see FindByIDForUpdate): run in the transaction that
+// issues the session, a password reset or claim cannot slip in between.
+func (r *UserRepository) ClearPasswordAttempts(ctx context.Context, id, checkedHash string, attempt int) (bool, error) {
+	query := `
+		UPDATE core.users
+		SET failed_login_count = 0, locked_until = NULL
+		WHERE id = $1 AND deleted_at IS NULL AND password_hash = $4
+		  AND (locked_until IS NULL OR locked_until <= $2 OR failed_login_count = $3)
+	`
+
+	tag, err := r.q(ctx).Exec(ctx, query, id, time.Now(), attempt, checkedHash)
+	if err != nil {
+		logger.Error("Failed to clear password attempts", logger.Err(err))
+		return false, err
+	}
+
+	return tag.RowsAffected() == 1, nil
+}
+
+// TouchLastLogin stamps a sign-in that did not use the password (e.g.
+// Google). It leaves the failure count and any lock alone: those guard
+// the password.
+func (r *UserRepository) TouchLastLogin(ctx context.Context, id string) error {
+	query := `UPDATE core.users SET last_login_at = $2 WHERE id = $1 AND deleted_at IS NULL`
+
+	if _, err := r.q(ctx).Exec(ctx, query, id, time.Now()); err != nil {
 		logger.Error("Failed to update last login", logger.Err(err))
 		return err
 	}
@@ -384,91 +578,14 @@ func (r *UserRepository) UpdateLastLogin(ctx context.Context, id string) error {
 	return nil
 }
 
-// IncrementFailedLogin increments failed login count
-func (r *UserRepository) IncrementFailedLogin(ctx context.Context, id string) error {
-	query := `
-		UPDATE core.users
-		SET failed_login_count = failed_login_count + 1
-		WHERE id = $1 AND deleted_at IS NULL
-	`
-
-	_, err := r.db.Exec(ctx, query, id)
-	if err != nil {
-		logger.Error("Failed to increment failed login count", logger.Err(err))
-		return err
-	}
-
-	return nil
-}
-
-// LockUser locks a user account
-func (r *UserRepository) LockUser(ctx context.Context, id string, until time.Time) error {
-	query := `
-		UPDATE core.users
-		SET locked_until = $2
-		WHERE id = $1 AND deleted_at IS NULL
-	`
-
-	_, err := r.db.Exec(ctx, query, id, until)
-	if err != nil {
-		logger.Error("Failed to lock user", logger.Err(err))
-		return err
-	}
-
-	return nil
-}
-
-// VerifyEmail marks user email as verified
-func (r *UserRepository) VerifyEmail(ctx context.Context, id string) error {
-	query := `
-		UPDATE core.users
-		SET is_email_verified = true, email_verified_at = $2
-		WHERE id = $1 AND deleted_at IS NULL
-	`
-
-	_, err := r.db.Exec(ctx, query, id, time.Now())
-	if err != nil {
-		logger.Error("Failed to verify email", logger.Err(err))
-		return err
-	}
-
-	return nil
-}
-
-// EmailExists checks if email already exists
-func (r *UserRepository) EmailExists(ctx context.Context, email string, excludeID *string) (bool, error) {
-	query := `SELECT EXISTS(SELECT 1 FROM core.users WHERE email = $1 AND deleted_at IS NULL`
-	args := []interface{}{email}
-
-	if excludeID != nil {
-		query += ` AND id != $2`
-		args = append(args, *excludeID)
-	}
-	query += `)`
-
+// UsernameExists reports whether a live account uses username. Only for
+// picking a free username; writes rely on ErrUsernameTaken instead.
+func (r *UserRepository) UsernameExists(ctx context.Context, username string) (bool, error) {
 	var exists bool
-	err := r.db.QueryRow(ctx, query, args...).Scan(&exists)
-	if err != nil {
-		logger.Error("Failed to check email existence", logger.Err(err))
-		return false, err
-	}
-
-	return exists, nil
-}
-
-// UsernameExists checks if username already exists
-func (r *UserRepository) UsernameExists(ctx context.Context, username string, excludeID *string) (bool, error) {
-	query := `SELECT EXISTS(SELECT 1 FROM core.users WHERE username = $1 AND deleted_at IS NULL`
-	args := []interface{}{username}
-
-	if excludeID != nil {
-		query += ` AND id != $2`
-		args = append(args, *excludeID)
-	}
-	query += `)`
-
-	var exists bool
-	err := r.db.QueryRow(ctx, query, args...).Scan(&exists)
+	err := r.q(ctx).QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM core.users WHERE username = $1 AND deleted_at IS NULL)`,
+		username,
+	).Scan(&exists)
 	if err != nil {
 		logger.Error("Failed to check username existence", logger.Err(err))
 		return false, err

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"venturo-skeleton-go-simple/pkg/discord"
+	"timebox-be/pkg/discord"
 
 	"go.uber.org/zap/zapcore"
 )

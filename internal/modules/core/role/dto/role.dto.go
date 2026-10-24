@@ -1,8 +1,13 @@
 package dto
 
-import "time"
+import (
+	"time"
 
-// CreateRoleRequest represents request to create a new role
+	"timebox-be/internal/shared/authz"
+)
+
+// CreateRoleRequest represents request to create a new role.
+// Permissions maps registered resources to a level: {"users": "editor"}.
 type CreateRoleRequest struct {
 	Code        string            `json:"code" binding:"required,min=2,max=50"`
 	Name        string            `json:"name" binding:"required,min=2,max=100"`
@@ -15,7 +20,7 @@ type CreateRoleRequest struct {
 type UpdateRoleRequest struct {
 	Name        *string           `json:"name" binding:"omitempty,min=2,max=100"`
 	Description *string           `json:"description" binding:"omitempty,max=1000"`
-	Permissions map[string]string `json:"permissions" binding:"omitempty"`
+	Permissions map[string]string `json:"permissions"`
 	IsActive    *bool             `json:"is_active"`
 }
 
@@ -38,31 +43,22 @@ type RoleResponse struct {
 	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
-// RoleListResponse represents paginated role list (used internally)
-type RoleListResponse struct {
-	Roles []RoleResponse `json:"roles"`
-	Total int64          `json:"total"`
-	Page  int            `json:"page"`
-	Limit int            `json:"limit"`
-}
-
 // RoleQueryParams represents query parameters for listing roles
 type RoleQueryParams struct {
-	Page          int      `form:"page,default=1" binding:"min=1"`
-	Limit         int      `form:"limit,default=10" binding:"min=1,max=100"`
-	Search        string   `form:"search" binding:"omitempty,max=255"`
-	ExcludeSystem *bool    `form:"-"` // Internal use only: exclude is_system roles
-	ExcludeCodes  []string `form:"-"` // Internal use only: exclude roles with these codes
+	Page         int      `form:"page,default=1" binding:"min=1,max=100000"`
+	Limit        int      `form:"limit,default=10" binding:"min=1,max=100"`
+	Search       string   `form:"search" binding:"omitempty,max=255"`
+	ExcludeCodes []string `form:"-"` // Internal use only: exclude roles with these codes
 }
 
-// AssignRoleRequest represents request to assign a role to a user
-type AssignRoleRequest struct {
-	UserID string `json:"user_id" binding:"required,uuid"`
-	RoleID string `json:"role_id" binding:"required,uuid"`
+// PermissionLevelInfo is one level a role can grant on a resource.
+type PermissionLevelInfo struct {
+	Level   string   `json:"level"`
+	Actions []string `json:"actions"`
 }
 
-// RemoveRoleRequest represents request to remove a role from a user
-type RemoveRoleRequest struct {
-	UserID string `json:"user_id" binding:"required,uuid"`
-	RoleID string `json:"role_id" binding:"required,uuid"`
+// PermissionCatalogResponse lists what a role editor can choose from.
+type PermissionCatalogResponse struct {
+	Resources []authz.Resource      `json:"resources"`
+	Levels    []PermissionLevelInfo `json:"levels"`
 }

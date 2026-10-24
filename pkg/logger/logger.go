@@ -2,6 +2,7 @@ package logger
 
 import (
 	"os"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -19,6 +20,10 @@ func Initialize(env string) error {
 		config = zap.NewProductionConfig()
 		config.EncoderConfig.TimeKey = "timestamp"
 		config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		// No sampling. zap's default keeps 100 entries per message per
+		// second, then 1 in 100 — and ginzap logs every request under its
+		// path, so above 100 rps almost every access log line vanished.
+		config.Sampling = nil
 	} else {
 		// Development config: Console format, Debug level
 		config = zap.NewDevelopmentConfig()
@@ -41,7 +46,7 @@ func Initialize(env string) error {
 	if webhook := os.Getenv("DISCORD_ALERT_WEBHOOK"); webhook != "" {
 		level := os.Getenv("DISCORD_ALERT_LEVEL")
 		debounce := 10 * time.Second
-		if v := os.Getenv("DISCORD_ALERT_DEBOUNCE"); v != "" {
+		if v := strings.TrimSpace(os.Getenv("DISCORD_ALERT_DEBOUNCE")); v != "" {
 			if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
 				debounce = d
 			}
@@ -96,9 +101,9 @@ func Warn(msg string, fields ...zap.Field) {
 	GetLogger().Warn(msg, fields...)
 }
 
+// Fatal logs at fatal level and exits the process with status 1.
 func Fatal(msg string, fields ...zap.Field) {
 	GetLogger().Fatal(msg, fields...)
-	os.Exit(1)
 }
 
 // WithContext creates a logger with context fields

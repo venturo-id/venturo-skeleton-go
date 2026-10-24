@@ -113,6 +113,30 @@ func TestDate_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestDate_RoundTripZero(t *testing.T) {
+	// A zero Date marshals to null; null must read back as a zero Date,
+	// or a client cannot send back what the API gave it.
+	type TestStruct struct {
+		DueDate Date `json:"due_date"`
+	}
+
+	output, err := json.Marshal(TestStruct{})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if string(output) != `{"due_date":null}` {
+		t.Fatalf("Marshal = %s, want {\"due_date\":null}", output)
+	}
+
+	ts := TestStruct{DueDate: NewDate(2026, time.January, 2)}
+	if err := json.Unmarshal(output, &ts); err != nil {
+		t.Fatalf("Unmarshal(null) failed: %v", err)
+	}
+	if !ts.DueDate.IsZero() {
+		t.Errorf("Unmarshal(null) = %v, want the zero Date", ts.DueDate)
+	}
+}
+
 func TestNewDate(t *testing.T) {
 	d := NewDate(2025, time.October, 31)
 	if d.String() != "2025-10-31" {

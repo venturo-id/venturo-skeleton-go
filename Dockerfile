@@ -1,77 +1,60 @@
 # Build stage
-FROM golang:1.26-alpine AS builder
+# Same Go as go.mod: the official image sets GOTOOLCHAIN=local, so an older
+# one refuses to build instead of fetching the right toolchain.
+FROM golang:1.26.10-alpine AS builder
 
-# Install build dependencies
-RUN apk add --no-cache git make
-
-# Set working directory
 WORKDIR /app
 
-# Copy go mod files
+# Dependencies first, so source changes reuse the module cache layer
 COPY go.mod go.sum ./
-
-# Download dependencies
 RUN go mod download
 
-# Copy source code
+# golang-migrate, built from source: same version on every architecture,
+# verified against the Go checksum database
+RUN CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" \
+    -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.1
+
 COPY . .
 
-# Build API binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o api cmd/api/main.go
+# API server and the initial super admin bootstrap (reads SEED_ADMIN_* env vars)
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o api ./cmd/api && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o seed-admin ./cmd/seed-admin
 
 # Final stage
-FROM alpine:latest
+FROM alpine:3.22
 
-# Set timezone to UTC
-ENV TZ=UTC
-RUN apk --no-cache add tzdata && \
-    cp /usr/share/zoneinfo/UTC /etc/localtime && \
-    echo "UTC" > /etc/timezone && \
-    apk del tzdata
+# UTC everywhere; ENV=production selects the JSON logger and gin release mode
+ENV TZ=UTC \
+    ENV=production \
+    SERVER_PORT=8080
 
-# Install ca-certificates for HTTPS, postgresql-client for migrations, curl for health checks, and bash for entrypoint
-RUN apk --no-cache add ca-certificates postgresql-client curl bash
+# ca-certificates for HTTPS (Google, R2, SMTP), postgresql-client for the
+# entrypoint's wait-for-database, bash for the entrypoint
+RUN apk --no-cache add ca-certificates tzdata postgresql-client bash
 
-# Install golang-migrate
-RUN curl -L https://github.com/golang-migrate/migrate/releases/download/v4.17.0/migrate.linux-amd64.tar.gz | tar xvz && \
-    mv migrate /usr/local/bin/migrate && \
-    chmod +x /usr/local/bin/migrate
-
-# Create non-root user
+# Non-root user
 RUN addgroup -g 1000 appuser && \
     adduser -D -u 1000 -G appuser appuser
 
 WORKDIR /app
 
-# Copy API binary from builder
-COPY --from=builder /app/api .
-
-# Copy migrations and seeders
+COPY --from=builder /go/bin/migrate /usr/local/bin/migrate
+COPY --from=builder /app/api /app/seed-admin ./
 COPY --from=builder /app/internal/database/migrations ./internal/database/migrations
-COPY --from=builder /app/internal/database/seeders ./internal/database/seeders
+COPY deployments/docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# Copy email templates
-COPY --from=builder /app/pkg/email/templates ./pkg/email/templates
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh && chown -R appuser:appuser /app
 
-# Copy entrypoint script
-COPY deployments/docker/docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# Numeric, so Kubernetes can verify runAsNonRoot without a runAsUser
+USER 1000:1000
 
-# Change ownership to non-root user
-RUN chown -R appuser:appuser /app
+EXPOSE 8080
 
-# Switch to non-root user
-USER appuser
-
-# Expose port
-EXPOSE 80
-
-# Health check
+# Liveness only; point the orchestrator's readiness probe at /ready
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/health || exit 1
 
-# Use entrypoint script
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
-# Default command: run API server (can be overridden in Kubernetes to run worker)
+# Default command: run the API server
 CMD ["/app/api"]

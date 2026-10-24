@@ -1,17 +1,15 @@
 package token
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"math/big"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
-// GenerateSecureToken generates a cryptographically secure random token
+// GenerateSecureToken returns length random bytes, hex encoded.
 func GenerateSecureToken(length int) (string, error) {
 	bytes := make([]byte, length)
 	if _, err := rand.Read(bytes); err != nil {
@@ -20,62 +18,38 @@ func GenerateSecureToken(length int) (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-// GenerateBase64Token generates a base64 encoded random token
-func GenerateBase64Token(length int) (string, error) {
-	bytes := make([]byte, length)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", fmt.Errorf("failed to generate base64 token: %w", err)
-	}
-	return base64.URLEncoding.EncodeToString(bytes), nil
+// Hash returns the hex SHA-256 of a high-entropy secret (refresh token,
+// API key secret, email link token) for storage and lookup. Never use it
+// for passwords: those are guessable and need bcrypt.
+func Hash(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
 }
 
-// GenerateEmailVerificationToken generates a token for email verification
-func GenerateEmailVerificationToken() (string, error) {
-	return GenerateSecureToken(32) // 64 character hex string
-}
-
-// GeneratePasswordResetToken generates a token for password reset
-func GeneratePasswordResetToken() (string, error) {
-	return GenerateSecureToken(32) // 64 character hex string
-}
-
-// GenerateRefreshToken generates a token for refresh tokens
-func GenerateRefreshToken() (string, error) {
-	return GenerateBase64Token(64) // Base64 encoded 64-byte token
-}
-
-// HashRefreshToken creates a SHA256 hash of the refresh token for storage
-func HashRefreshToken(token string) string {
-	hash := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(hash[:])
-}
-
-// GenerateOTP generates a cryptographically secure 6-digit OTP code
-func GenerateOTP() (string, error) {
-	// Generate a random number between 100000 and 999999
-	max := big.NewInt(900000) // 999999 - 100000
-	n, err := rand.Int(rand.Reader, max)
+// GenerateCode returns digits random decimal digits, for a one-time code
+// a person reads from an email and types in. Leading zeros are kept.
+func GenerateCode(digits int) (string, error) {
+	limit := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(digits)), nil)
+	n, err := rand.Int(rand.Reader, limit)
 	if err != nil {
-		return "", fmt.Errorf("failed to generate OTP: %w", err)
+		return "", fmt.Errorf("failed to generate code: %w", err)
 	}
-
-	// Add 100000 to ensure 6 digits
-	otp := n.Int64() + 100000
-	return fmt.Sprintf("%06d", otp), nil
+	return fmt.Sprintf("%0*d", digits, n), nil
 }
 
-// HashOTP creates a bcrypt hash of the OTP for secure storage
-// Uses bcrypt instead of SHA256 for better security against rainbow table attacks
-func HashOTP(otp string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(otp), bcrypt.DefaultCost)
-	if err != nil {
-		return "", fmt.Errorf("failed to hash OTP: %w", err)
-	}
-	return string(hash), nil
+// HashCode returns the hex HMAC-SHA256 of a one-time code for storage.
+// A code has too few digits for a plain hash — every value can be tried
+// offline — so it is keyed with a server secret, and bound to id (the row
+// it is stored in) so equal codes of different rows never hash alike.
+func HashCode(key []byte, id, code string) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(id))
+	mac.Write([]byte{0})
+	mac.Write([]byte(code))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// VerifyOTP verifies if the provided OTP matches the hashed OTP
-func VerifyOTP(otp, hashedOTP string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hashedOTP), []byte(otp))
-	return err == nil
+// EqualHash compares two hashes in constant time.
+func EqualHash(a, b string) bool {
+	return hmac.Equal([]byte(a), []byte(b))
 }

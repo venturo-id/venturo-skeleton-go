@@ -6,31 +6,31 @@ import (
 	"unicode"
 )
 
+// PasswordMinLength and PasswordMaxBytes bound a password. bcrypt only
+// uses the first 72 bytes and refuses to hash longer input, so anything
+// longer is rejected up front instead of failing deep in the service.
+const (
+	PasswordMinLength = 8
+	PasswordMaxBytes  = 72
+)
+
 var (
 	ErrPasswordTooShort      = errors.New("password must be at least 8 characters long")
+	ErrPasswordTooLong       = errors.New("password must not exceed 72 bytes")
 	ErrPasswordNoUppercase   = errors.New("password must contain at least one uppercase letter")
 	ErrPasswordNoLowercase   = errors.New("password must contain at least one lowercase letter")
 	ErrPasswordNoNumber      = errors.New("password must contain at least one number")
-	ErrPasswordNoSpecial     = errors.New("password must contain at least one special character")
 	ErrPasswordTooCommon     = errors.New("password is too common, please choose a stronger password")
 	ErrPasswordContainsEmail = errors.New("password must not contain your email address")
 )
 
-// PasswordStrength represents password strength level
-type PasswordStrength int
-
-const (
-	Weak PasswordStrength = iota
-	Medium
-	Strong
-	VeryStrong
-)
-
 // ValidatePassword validates password against security requirements
 func ValidatePassword(password string) error {
-	// Minimum length check
-	if len(password) < 8 {
+	if len(password) < PasswordMinLength {
 		return ErrPasswordTooShort
+	}
+	if len(password) > PasswordMaxBytes {
+		return ErrPasswordTooLong
 	}
 
 	var (
@@ -61,11 +61,6 @@ func ValidatePassword(password string) error {
 	if !hasNumber {
 		return ErrPasswordNoNumber
 	}
-
-	// Optional: Require special character (commented out for flexibility)
-	// if !hasSpecial {
-	// 	return ErrPasswordNoSpecial
-	// }
 
 	// Check against common passwords
 	if isCommonPassword(password) {
@@ -100,62 +95,6 @@ func ValidatePasswordWithEmail(password, email string) error {
 	}
 
 	return nil
-}
-
-// GetPasswordStrength calculates password strength
-func GetPasswordStrength(password string) PasswordStrength {
-	var score int
-
-	// Length score
-	if len(password) >= 8 {
-		score++
-	}
-	if len(password) >= 12 {
-		score++
-	}
-	if len(password) >= 16 {
-		score++
-	}
-
-	// Character diversity score
-	var hasUpper, hasLower, hasNumber, hasSpecial bool
-	for _, char := range password {
-		switch {
-		case unicode.IsUpper(char):
-			hasUpper = true
-		case unicode.IsLower(char):
-			hasLower = true
-		case unicode.IsNumber(char):
-			hasNumber = true
-		case unicode.IsPunct(char) || unicode.IsSymbol(char):
-			hasSpecial = true
-		}
-	}
-
-	if hasUpper {
-		score++
-	}
-	if hasLower {
-		score++
-	}
-	if hasNumber {
-		score++
-	}
-	if hasSpecial {
-		score++
-	}
-
-	// Convert score to strength
-	switch {
-	case score <= 2:
-		return Weak
-	case score <= 4:
-		return Medium
-	case score <= 6:
-		return Strong
-	default:
-		return VeryStrong
-	}
 }
 
 // isCommonPassword checks if password is in common passwords list

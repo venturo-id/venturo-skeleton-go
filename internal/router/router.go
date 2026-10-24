@@ -2,131 +2,233 @@ package router
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"time"
-	"venturo-skeleton-go-simple/internal/config"
-	"venturo-skeleton-go-simple/internal/middleware"
+
+	"timebox-be/internal/config"
+	"timebox-be/internal/middleware"
 
 	// Core modules
-	"venturo-skeleton-go-simple/internal/modules/core/api_key"
-	"venturo-skeleton-go-simple/internal/modules/core/auth"
-	"venturo-skeleton-go-simple/internal/modules/core/role"
-	"venturo-skeleton-go-simple/internal/modules/core/user"
-	userRepo "venturo-skeleton-go-simple/internal/modules/core/user/repository"
+	"timebox-be/internal/modules/core/apikey"
+	"timebox-be/internal/modules/core/auditlog"
+	"timebox-be/internal/modules/core/auth"
+	authHandler "timebox-be/internal/modules/core/auth/handler"
+	authService "timebox-be/internal/modules/core/auth/service"
+	"timebox-be/internal/modules/core/role"
+	roleRepo "timebox-be/internal/modules/core/role/repository"
+	"timebox-be/internal/modules/core/user"
+	userRepo "timebox-be/internal/modules/core/user/repository"
 
-	"venturo-skeleton-go-simple/internal/shared/authz"
-	sharedRedis "venturo-skeleton-go-simple/internal/shared/redis"
+	"timebox-be/internal/shared/audit"
+	"timebox-be/internal/shared/authz"
+	"timebox-be/internal/shared/mailer"
+	"timebox-be/internal/shared/ratelimit"
 
-	pkgfirebase "venturo-skeleton-go-simple/pkg/firebase"
-	"venturo-skeleton-go-simple/pkg/logger"
+	"timebox-be/pkg/avatar"
+	"timebox-be/pkg/email"
+	"timebox-be/pkg/googleauth"
+	"timebox-be/pkg/logger"
+	"timebox-be/pkg/storage"
 
 	"github.com/gin-contrib/cors"
 	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"go.uber.org/zap"
+	goredis "github.com/redis/go-redis/v9"
 )
 
-func Setup(router *gin.Engine, db *pgxpool.Pool, cfg *config.Config) {
-	// Get logger instance
+// maxBodyBytes caps every request body. JSON payloads stay far below it;
+// the one upload through the API, a profile photo, is cropped to 512px by
+// the app first. Larger files go straight to storage through presigned
+// URLs.
+const maxBodyBytes = 2 << 20 // 2 MiB
+
+// refreshTokenCleanupInterval is how often expired refresh tokens are deleted.
+const refreshTokenCleanupInterval = time.Hour
+
+// Dependencies is the infrastructure the modules are wired on.
+type Dependencies struct {
+	DB     *pgxpool.Pool
+	Redis  *goredis.Client
+	Config *config.Config
+	// Mailer sends in the background; wait for it on shutdown.
+	Mailer *mailer.Async
+	// Audit is the audit log (audit.Discard without MONGO_URI); close it
+	// on shutdown.
+	Audit audit.Log
+}
+
+// NewMailer builds the email sender: SMTP when configured, otherwise one
+// that only logs (at debug level, with the codes, for development).
+// Email verification cannot be required without SMTP.
+func NewMailer(cfg *config.Config) (*mailer.Async, error) {
+	if !cfg.Email.Enabled() {
+		if cfg.Security.EmailVerificationRequired {
+			return nil, errors.New("EMAIL_VERIFICATION_REQUIRED=true needs SMTP (at least SMTP_HOST and SMTP_FROM_EMAIL)")
+		}
+		logger.Warn("SMTP is not configured — emails are only logged at debug level")
+		return mailer.NewAsync(&email.NoOpEmailService{}), nil
+	}
+
+	smtp, err := email.NewSMTPEmailService(cfg.Email)
+	if err != nil {
+		return nil, err
+	}
+	return mailer.NewAsync(smtp), nil
+}
+
+// Setup registers the middleware and every module's routes on engine.
+// Background jobs it starts stop when ctx is cancelled. Drain the returned
+// Readiness before shutting the server down.
+func Setup(ctx context.Context, engine *gin.Engine, deps Dependencies) (*Readiness, error) {
+	cfg := deps.Config
 	log := logger.GetLogger()
 
-	// ─── Redis & authz cache ────────────────────────────────────────
-	// Redis backs the per-user permission cache (see
-	// internal/shared/authz). It is load-bearing: RequirePermission
-	// middleware refuses to answer without it, so a failed bootstrap
-	// here is fatal rather than a silent degrade.
-	redisClient, err := sharedRedis.New(context.Background(), cfg.Redis)
-	if err != nil {
-		log.Fatal("Failed to connect to Redis", zap.Error(err))
+	// Only the configured proxies may set X-Forwarded-For. Gin trusts every
+	// proxy by default, which lets any client spoof its IP past API-key IP
+	// whitelists and per-IP rate limits.
+	if err := engine.SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("invalid TRUSTED_PROXIES: %w", err)
 	}
-	log.Info("Redis connected",
-		zap.String("addr", cfg.Redis.Host+":"+cfg.Redis.Port),
-		zap.Int("db", cfg.Redis.DB),
-		zap.Duration("permission_ttl", cfg.Redis.PermissionTTL),
-	)
+	if len(cfg.Server.TrustedProxies) == 0 && cfg.Server.IsProduction() {
+		logger.Warn("TRUSTED_PROXIES is empty — behind an ingress every client shares the ingress IP for rate limits and API-key whitelists")
+	}
 
-	// Ginzap middleware for logging HTTP requests
-	router.Use(ginzap.Ginzap(log, time.RFC3339, true))
+	// Shared Redis-backed counter for per-IP auth limits and per-key API limits
+	limiter := ratelimit.New(deps.Redis)
+	middleware.SetRateLimiter(limiter)
 
-	// Recovery middleware with Zap (handles panics)
-	router.Use(ginzap.RecoveryWithZap(log, true))
-
-	// CORS middleware configuration
-	router.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:3000", "http://localhost:3001", "http://localhost:8081", "https://app.tuai.id", "https://jesuit.venturo.pro", "https://skeleton.venturo.id"},
-		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Key"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
+	engine.Use(ginzap.GinzapWithConfig(log, &ginzap.Config{
+		TimeFormat: time.RFC3339,
+		UTC:        true,
+		SkipPaths:  []string{"/health", "/ready"},
 	}))
+	engine.Use(middleware.Recovery())
+	engine.Use(middleware.AuditClient())
+	if len(cfg.Server.CORSAllowedOrigins) > 0 {
+		engine.Use(cors.New(cors.Config{
+			AllowOrigins:     cfg.Server.CORSAllowedOrigins,
+			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Key", authHandler.ClientHeader},
+			ExposeHeaders:    []string{"Content-Length", "Retry-After"},
+			AllowCredentials: true,
+			MaxAge:           12 * time.Hour,
+		}))
+	} else {
+		logger.Warn("CORS_ALLOWED_ORIGINS is empty — browsers on other origins cannot call the API")
+	}
+	engine.Use(middleware.MaxBodySize(maxBodyBytes))
 
-	// Health check endpoint
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"status":  "ok",
-			"message": "Tuai API is running",
-		})
+	// Liveness: the process is up, until it exits. Readiness: it can reach
+	// its stores and is not draining for shutdown.
+	engine.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+	ready := newReadiness(postgresStore(deps.DB), redisStore(deps.Redis))
+	engine.GET("/ready", ready.handle)
 
-	// Core v1 routes
-	coreV1 := router.Group("/core/v1")
-	{
-		// Initialize and setup auth module
-		authModule := auth.Initialize(db, cfg)
-		authModule.SetupRoutes(coreV1)
+	// ─── Shared repositories & authz ────────────────────────────────
+	// The role repository is the source of truth for the authz cache;
+	// JWTAuth reads that cache on every request.
+	users := userRepo.NewUserRepository(deps.DB)
+	roles := roleRepo.NewRoleRepository(deps.DB)
+	authzService := authz.NewService(deps.Redis, roles, cfg.Redis.PermissionTTL)
+	middleware.SetAuthzService(authzService)
 
-		// Wire the user_identities repo (used by Google sign-in to look
-		// up / link Firebase identities to a core.users row).
-		authModule.Service.SetUserIdentityRepo(userRepo.NewUserIdentityRepository(db))
-
-		// Wire the Firebase Admin client when configured. If the
-		// operator hasn't set FIREBASE_PROJECT_ID the verifier stays
-		// nil; the /auth/google endpoint will then surface a 503
-		// "Google sign-in is not configured" instead of crashing.
-		if cfg.Firebase.ProjectID != "" {
-			fbClient, err := pkgfirebase.New(context.Background(), cfg.Firebase.ProjectID, cfg.Firebase.CredentialsJSON)
-			if err != nil {
-				log.Fatal("Failed to initialize Firebase Admin", zap.Error(err))
-			}
-			authModule.Service.SetFirebaseVerifier(fbClient)
-			log.Info("Firebase Admin initialized", zap.String("project_id", cfg.Firebase.ProjectID))
-		} else {
-			log.Warn("FIREBASE_PROJECT_ID not set — /auth/google endpoint disabled")
+	// Google sign-in is optional per platform: one without a client
+	// answers 503.
+	google, err := googleauth.New(ctx, cfg.Google)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Google sign-in: %w", err)
+	}
+	for platform, client := range map[string]googleauth.Client{
+		googleauth.PlatformDesktop: cfg.Google.Desktop, googleauth.PlatformWeb: cfg.Google.Web,
+	} {
+		if !client.Enabled() {
+			logger.Warn("Google sign-in not configured", logger.String("platform", platform))
 		}
-
-		// Initialize and setup user module
-		userModule := user.Initialize(db)
-		userModule.SetupRoutes(coreV1)
-
-		// Initialize and setup role module
-		roleModule := role.Initialize(db)
-		roleModule.SetupRoutes(coreV1)
-
-		// Wire the permission cache now that both Redis and the role repo
-		// exist. The role repo acts as the authoritative fetcher on cache
-		// miss; role and user services use the same cache to invalidate
-		// stale entries when role permissions or assignments change; auth
-		// service uses it to serve /auth/me without hitting the DB on every
-		// call.
-		authzService := authz.NewService(redisClient, roleModule.Repository, cfg.Redis.PermissionTTL)
-		middleware.SetAuthzService(authzService)
-		roleModule.Service.SetPermissionCacheInvalidator(authzService)
-		authModule.Service.SetPermissionReader(authzService)
-		authModule.Service.SetRoleRepo(roleModule.Repository)
-
-		// Wire role assignment into the user service: create/update with
-		// role_id writes core.user_roles and drops the user's cached set.
-		userModule.Service.SetRoleLookup(roleModule.Repository)
-		userModule.Service.SetPermissionCacheInvalidator(authzService)
-
-		// Initialize and setup API key module
-		apiKeyModule := api_key.Initialize(db, roleModule.Repository)
-		apiKeyModule.SetupRoutes(coreV1)
-
-		// Wire up API key validator for middleware
-		middleware.SetApiKeyValidator(apiKeyModule.Service)
 	}
 
-	log.Info("Routes setup completed", zap.Int("routes", len(router.Routes())))
+	avatars, err := newAvatarStore(cfg.Storage)
+	if err != nil {
+		return nil, err
+	}
+
+	// ─── Modules ────────────────────────────────────────────────────
+	apiKeyModule := apikey.Initialize(deps.DB, authzService, limiter, deps.Audit)
+	middleware.SetAPIKeyValidator(apiKeyModule.Service)
+
+	authModule := auth.Initialize(deps.DB, cfg, auth.Dependencies{
+		Users:    users,
+		Roles:    roles,
+		Subjects: authzService,
+		APIKeys:  apiKeyModule.Service,
+		Limiter:  limiter,
+		Audit:    deps.Audit,
+		Mailer:   deps.Mailer,
+		Google:   google,
+		Avatars:  avatarFiles(avatars),
+	})
+	// Deactivating or deleting a user ends the user's sessions through the
+	// auth service, which also does the caller's password change.
+	userModule := user.Initialize(deps.DB, users, roles, authzService, authModule.Service, deps.Audit, avatars)
+	roleModule := role.Initialize(roles, authzService, deps.Audit)
+	auditLogModule := auditlog.Initialize(deps.Audit)
+
+	coreV1 := engine.Group("/core/v1")
+	authModule.SetupRoutes(coreV1)
+	userModule.SetupRoutes(coreV1)
+	roleModule.SetupRoutes(coreV1)
+	apiKeyModule.SetupRoutes(coreV1)
+	auditLogModule.SetupRoutes(coreV1)
+
+	authModule.StartTokenCleanup(ctx, refreshTokenCleanupInterval)
+
+	logger.Info("Routes setup completed", logger.Int("routes", len(engine.Routes())))
+	return ready, nil
+}
+
+// newAvatarStore builds the profile photo store on R2. Photos are served
+// from R2_PUBLIC_URL, so without it (or without R2) there is none: the
+// avatar endpoints answer 503 and Google pictures are not copied.
+func newAvatarStore(cfg storage.Config) (*avatar.Store, error) {
+	if !cfg.Enabled() || cfg.PublicURL == "" {
+		logger.Warn("R2 storage or R2_PUBLIC_URL not configured — profile photos disabled")
+		return nil, nil
+	}
+	r2, err := storage.NewR2(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("initialize R2 storage: %w", err)
+	}
+	logger.Info("Profile photos stored in R2", logger.String("public_url", cfg.PublicURL))
+	return avatar.NewStore(r2, cfg.PublicURL), nil
+}
+
+// avatarStore is the avatar store as the auth module uses it: copying
+// Google profile pictures in, and deleting a closed account's photo.
+type avatarStore struct {
+	store *avatar.Store
+}
+
+// avatarFiles is the auth module's photo storage, or nil (not a typed
+// nil) without a store.
+func avatarFiles(store *avatar.Store) authService.Avatars {
+	if store == nil {
+		return nil
+	}
+	return avatarStore{store: store}
+}
+
+func (a avatarStore) ImportGooglePicture(ctx context.Context, userID, pictureURL string) (string, error) {
+	photo, err := avatar.FetchGooglePicture(ctx, pictureURL)
+	if err != nil {
+		return "", err
+	}
+	return a.store.Put(ctx, userID, photo)
+}
+
+func (a avatarStore) Delete(ctx context.Context, avatarURL string) error {
+	return a.store.Delete(ctx, avatarURL)
 }

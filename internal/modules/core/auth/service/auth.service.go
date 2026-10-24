@@ -2,432 +2,760 @@ package service
 
 import (
 	"context"
-	cryptorand "crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
-	"venturo-skeleton-go-simple/internal/config"
-	"venturo-skeleton-go-simple/internal/modules/core/auth/domain"
-	"venturo-skeleton-go-simple/internal/modules/core/auth/dto"
-	"venturo-skeleton-go-simple/internal/modules/core/auth/repository"
-	userDomain "venturo-skeleton-go-simple/internal/modules/core/user/domain"
-	userRepo "venturo-skeleton-go-simple/internal/modules/core/user/repository"
-	"venturo-skeleton-go-simple/pkg/crypto"
-	pkgfirebase "venturo-skeleton-go-simple/pkg/firebase"
-	"venturo-skeleton-go-simple/pkg/jwt"
-	"venturo-skeleton-go-simple/pkg/logger"
-	"venturo-skeleton-go-simple/pkg/token"
+	"timebox-be/internal/config"
+	"timebox-be/internal/database"
+	apikeyDTO "timebox-be/internal/modules/core/apikey/dto"
+	"timebox-be/internal/modules/core/auth/domain"
+	"timebox-be/internal/modules/core/auth/dto"
+	"timebox-be/internal/modules/core/auth/repository"
+	userDomain "timebox-be/internal/modules/core/user/domain"
+	userRepo "timebox-be/internal/modules/core/user/repository"
+	"timebox-be/internal/shared/audit"
+	"timebox-be/internal/shared/authz"
+	"timebox-be/pkg/crypto"
+	"timebox-be/pkg/email"
+	"timebox-be/pkg/googleauth"
+	"timebox-be/pkg/jwt"
+	"timebox-be/pkg/logger"
+	"timebox-be/pkg/token"
+	"timebox-be/pkg/validator"
 )
 
 var (
+	// ErrInvalidCredentials covers an unknown login, a wrong password and
+	// a locked account alike, so a response never reveals which accounts
+	// exist or whether a guess made during a lock was right.
 	ErrInvalidCredentials    = errors.New("invalid credentials")
 	ErrUserNotActive         = errors.New("user is not active")
-	ErrUserLocked            = errors.New("user account is locked")
 	ErrEmailNotVerified      = errors.New("email not verified")
 	ErrEmailAlreadyExists    = errors.New("email already exists")
 	ErrUsernameAlreadyExists = errors.New("username already exists")
 	ErrInvalidRefreshToken   = errors.New("invalid refresh token")
 	ErrRefreshTokenExpired   = errors.New("refresh token expired")
 	ErrRefreshTokenRevoked   = errors.New("refresh token revoked")
+	// ErrInvalidResetToken: a reset grant that is unknown, used, expired,
+	// or issued for an address the account no longer has.
+	ErrInvalidResetToken = errors.New("invalid or expired reset token")
 
-	// Google sign-in errors
-	ErrFirebaseNotConfigured = errors.New("google sign-in not configured")
-	ErrInvalidGoogleToken    = errors.New("invalid google id token")
-	ErrGoogleEmailMissing    = errors.New("google account did not return an email")
-	ErrUnexpectedProvider    = errors.New("unexpected firebase sign-in provider")
+	// Password change errors. The caller is signed in, so these may say
+	// what went wrong.
+	ErrIncorrectPassword = errors.New("current password is incorrect")
+	// ErrNoPassword: a Google-only account has no password to change or
+	// confirm with, and cannot unlink Google; it sets one through
+	// forgot-password.
+	ErrNoPassword = errors.New("account has no password")
+	// ErrPasswordLocked: too many wrong passwords, through sign-in or a
+	// password change; wait for the lock to pass.
+	ErrPasswordLocked = errors.New("too many incorrect passwords")
 )
 
-// firebaseSignInProviderGoogle is the value Firebase reports in the
-// ID token's `firebase.sign_in_provider` claim for a Google sign-in.
-const firebaseSignInProviderGoogle = "google.com"
-
+// Fallbacks for a service built without these settings. Production reads
+// MAX_LOGIN_ATTEMPTS, ACCOUNT_LOCKOUT_DURATION and JWT_REFRESH_EXPIRATION.
 const (
-	MaxFailedLoginAttempts = 5
-	LockDuration           = 15 * time.Minute
-	RefreshTokenExpiry     = 7 * 24 * time.Hour // 7 days
-	AccessTokenExpiryHours = 24
+	defaultMaxLoginAttempts       = 5
+	defaultLockoutDuration        = 30 * time.Minute
+	defaultRefreshTokenExpiration = 7 * 24 * time.Hour
+	defaultMaxVerificationEmails  = 5
+	defaultMaxResetEmails         = 3
 )
 
-// RoleRepository interface for role operations
+// desktopAppName is how a session of the desktop app (Electron, whose
+// user agent carries "timebox/<version>" and "Electron/<version>") is
+// named, in place of a browser.
+const desktopAppName = "Timebox Desktop"
+
+// refreshReuseGrace separates a client race from a stolen token. A rotated
+// refresh token presented again within this window is most likely two
+// tabs refreshing at once, and is simply refused. Later than that, the
+// token was copied: every session of the user is revoked.
+const refreshReuseGrace = 30 * time.Second
+
+// RoleRepository is what the auth service needs from the role module.
 type RoleRepository interface {
-	GetUserPermissions(ctx context.Context, userID string) ([]string, error)
 	GetUserRoleNames(ctx context.Context, userID string) ([]string, error)
+	// RemoveUserRoles joins the transaction carried by ctx.
+	RemoveUserRoles(ctx context.Context, userID string) error
 }
 
-// PermissionReader is the narrow seam GetMe needs from the authz
-// package. Implemented by *authz.Service — accepted as an interface so
-// auth doesn't import authz directly (and so tests can fake it).
-type PermissionReader interface {
-	GetPermissions(ctx context.Context, userID string) ([]string, error)
+// SubjectCache is the authz cache (implemented by *authz.Service): the
+// user's live permissions, and invalidation after their sessions are
+// revoked.
+type SubjectCache interface {
+	GetSubject(ctx context.Context, userID string) (authz.Subject, error)
+	InvalidateUser(ctx context.Context, userID string) error
 }
 
-// FirebaseVerifier is the seam the auth service uses to verify Firebase
-// ID tokens. Concrete impl: *pkg/firebase.Client. Kept as an interface
-// so tests can fake it without spinning up Firebase, and so the
-// production wiring stays optional — the auth service still boots when
-// Firebase is not configured; only the Google sign-in endpoint refuses
-// to work.
-type FirebaseVerifier interface {
-	VerifyIDToken(ctx context.Context, idToken string) (*pkgfirebase.VerifiedToken, error)
+// GoogleOAuth exchanges the authorization codes of Google sign-in
+// (implemented by *googleauth.Verifier). Kept as an interface so tests
+// can fake Google.
+type GoogleOAuth interface {
+	ClientID(platform string) (string, error)
+	RedirectURIs(platform string) []string
+	Exchange(ctx context.Context, e googleauth.Exchange) (*googleauth.Identity, error)
+}
+
+// Avatars is the profile photo storage. nil: Google pictures are not
+// copied, and accounts made with Google start without one.
+type Avatars interface {
+	// ImportGooglePicture copies a Google profile picture into storage and
+	// returns its public URL.
+	ImportGooglePicture(ctx context.Context, userID, pictureURL string) (string, error)
+	// Delete removes a stored photo; a URL it did not store is left alone.
+	Delete(ctx context.Context, avatarURL string) error
+}
+
+// APIKeys is what the auth service needs from the API key module
+// (implemented by its service). Writes join the transaction carried by ctx.
+type APIKeys interface {
+	RevokeAllForUser(ctx context.Context, userID, reason string) error
+	DeleteAllForUser(ctx context.Context, userID string) error
+	ListAllForUser(ctx context.Context, userID string) ([]apikeyDTO.APIKeyResponse, error)
+}
+
+// AuditLog records what happens to accounts, and lists what one user did
+// for their data export (implemented by audit.Log).
+type AuditLog interface {
+	audit.Recorder
+	ListByActor(ctx context.Context, userID string, limit int) ([]audit.Entry, error)
+}
+
+// RateLimiter counts the emails sent to each account, and keeps codes
+// apart by the resend cooldown (implemented by *ratelimit.Limiter).
+type RateLimiter interface {
+	Allow(ctx context.Context, key string, limit int, window time.Duration) (allowed bool, retryAfter time.Duration, err error)
+	Hold(ctx context.Context, key string, d time.Duration) (held bool, remaining time.Duration, err error)
+	Remaining(ctx context.Context, key string) (time.Duration, error)
+}
+
+// Deps are the auth service's collaborators. Every field is required
+// except Google (nil disables Google sign-in) and Avatars.
+type Deps struct {
+	DB            database.TxBeginner
+	Users         *userRepo.UserRepository
+	Identities    *userRepo.UserIdentityRepository
+	RefreshTokens *repository.RefreshTokenRepository
+	AccountTokens *repository.AccountTokenRepository
+	Roles         RoleRepository
+	Subjects      SubjectCache
+	APIKeys       APIKeys
+	Limiter       RateLimiter
+	Audit         AuditLog
+	// Mailer should not block (see internal/shared/mailer): the public
+	// email endpoints must answer equally fast whether or not they send.
+	Mailer  email.EmailService
+	Google  GoogleOAuth
+	Avatars Avatars
 }
 
 type AuthService struct {
+	db               database.TxBeginner
 	userRepo         *userRepo.UserRepository
 	userIdentityRepo *userRepo.UserIdentityRepository
 	refreshTokenRepo *repository.RefreshTokenRepository
+	accountTokenRepo *repository.AccountTokenRepository
 	roleRepo         RoleRepository
-	permissionReader PermissionReader
-	firebase         FirebaseVerifier
-	config           *config.Config
+	subjects         SubjectCache
+	apiKeys          APIKeys
+	limiter          RateLimiter
+	audit            AuditLog
+	mailer           email.EmailService
+	google           GoogleOAuth // nil: Google sign-in is disabled
+	avatars          Avatars     // nil: Google pictures are not copied
+	security         config.SecurityConfig
 }
 
-func NewAuthService(
-	userRepo *userRepo.UserRepository,
-	refreshTokenRepo *repository.RefreshTokenRepository,
-	cfg *config.Config,
-) *AuthService {
+// NewAuthService wires the auth service. A missing required dependency is
+// a wiring bug and panics at startup rather than on the first request
+// that needs it.
+func NewAuthService(security config.SecurityConfig, d Deps) *AuthService {
+	required := map[string]bool{
+		"DB": d.DB == nil, "Users": d.Users == nil, "Identities": d.Identities == nil,
+		"RefreshTokens": d.RefreshTokens == nil, "AccountTokens": d.AccountTokens == nil,
+		"Roles": d.Roles == nil, "Subjects": d.Subjects == nil, "APIKeys": d.APIKeys == nil,
+		"Limiter": d.Limiter == nil, "Mailer": d.Mailer == nil, "Audit": d.Audit == nil,
+	}
+	for name, missing := range required {
+		if missing {
+			panic("auth service: missing dependency " + name)
+		}
+	}
+
 	return &AuthService{
-		userRepo:         userRepo,
-		refreshTokenRepo: refreshTokenRepo,
-		config:           cfg,
+		db:               d.DB,
+		userRepo:         d.Users,
+		userIdentityRepo: d.Identities,
+		refreshTokenRepo: d.RefreshTokens,
+		accountTokenRepo: d.AccountTokens,
+		roleRepo:         d.Roles,
+		subjects:         d.Subjects,
+		apiKeys:          d.APIKeys,
+		limiter:          d.Limiter,
+		audit:            d.Audit,
+		mailer:           d.Mailer,
+		google:           d.Google,
+		avatars:          d.Avatars,
+		security:         security,
 	}
 }
 
-// SetUserIdentityRepo wires the user_identities repository used by the
-// Google sign-in flow.
-func (s *AuthService) SetUserIdentityRepo(repo *userRepo.UserIdentityRepository) {
-	s.userIdentityRepo = repo
+func (s *AuthService) maxLoginAttempts() int {
+	if s.security.MaxLoginAttempts <= 0 {
+		return defaultMaxLoginAttempts
+	}
+	return s.security.MaxLoginAttempts
 }
 
-// SetFirebaseVerifier wires the Firebase ID-token verifier. Pass nil
-// (or never call this) to disable Google sign-in — the endpoint will
-// then return ErrFirebaseNotConfigured.
-func (s *AuthService) SetFirebaseVerifier(f FirebaseVerifier) {
-	s.firebase = f
+func (s *AuthService) lockoutDuration() time.Duration {
+	if s.security.AccountLockoutDuration <= 0 {
+		return defaultLockoutDuration
+	}
+	return s.security.AccountLockoutDuration
 }
 
-// SetRoleRepo sets the role repository
-func (s *AuthService) SetRoleRepo(repo RoleRepository) {
-	s.roleRepo = repo
+func (s *AuthService) refreshTokenExpiration() time.Duration {
+	if s.security.RefreshTokenExpiration <= 0 {
+		return defaultRefreshTokenExpiration
+	}
+	return s.security.RefreshTokenExpiration
 }
 
-// SetPermissionReader wires the authz-backed permission cache used by
-// GetMe. Without this, GetMe falls back to the role repo directly —
-// correct, but bypasses Redis.
-func (s *AuthService) SetPermissionReader(r PermissionReader) {
-	s.permissionReader = r
+// findByLogin resolves a sign-in identifier. Usernames cannot contain "@",
+// so an identifier is either an email or a username, never both.
+func (s *AuthService) findByLogin(ctx context.Context, login string) (*userDomain.User, error) {
+	if strings.Contains(login, "@") {
+		return s.userRepo.FindByEmail(ctx, validator.NormalizeEmail(login))
+	}
+	return s.userRepo.FindByUsername(ctx, validator.NormalizeUsername(login))
 }
 
-// SignUp registers a new user
+// SignUp registers a new user and emails them a verification code. The
+// account signs in by entering it (VerifyEmail), or with its password once
+// verified — or at once, when EMAIL_VERIFICATION_REQUIRED is off.
 func (s *AuthService) SignUp(ctx context.Context, req *dto.SignUpRequest) (*dto.SignUpResponse, error) {
-	// Check email uniqueness
-	exists, err := s.userRepo.EmailExists(ctx, req.Email, nil)
-	if err != nil {
-		return nil, err
-	}
-	if exists {
-		return nil, ErrEmailAlreadyExists
-	}
-
-	// Check username uniqueness
-	exists, err = s.userRepo.UsernameExists(ctx, req.Username, nil)
-	if err != nil {
-		return nil, err
-	}
-	if exists {
-		return nil, ErrUsernameAlreadyExists
-	}
-
-	// Hash password
 	passwordHash, err := crypto.HashPassword(req.Password)
 	if err != nil {
 		logger.Error("Failed to hash password", logger.Err(err))
 		return nil, err
 	}
 
+	// The email is only a claim here — nothing has proven the registrant
+	// owns it — so it stays unverified. Google sign-in relies on this flag
+	// to decide whether it may link into an existing account.
 	now := time.Now()
 	user := &userDomain.User{
-		ID:              uuid.New().String(),
-		Email:           req.Email,
-		Username:        req.Username,
-		PasswordHash:    passwordHash,
-		FullName:        req.FullName,
-		Phone:           req.Phone,
-		IsActive:        true,
-		IsEmailVerified: true,
-		EmailVerifiedAt: &now,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:           uuid.New().String(),
+		Email:        validator.NormalizeEmail(req.Email),
+		Username:     validator.NormalizeUsername(req.Username),
+		PasswordHash: passwordHash,
+		FullName:     req.FullName,
+		Phone:        req.Phone,
+		IsActive:     true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if req.Timezone != nil {
+		user.Timezone = *req.Timezone
 	}
 
-	err = s.userRepo.Create(ctx, user)
+	// A username derived from the email (none was chosen) that someone
+	// took meanwhile is derived again, once.
+	derived := user.Username == ""
+	for attempt := 0; ; attempt++ {
+		if derived {
+			if user.Username, err = s.allocateUsernameFromEmail(ctx, user.Email); err != nil {
+				return nil, err
+			}
+		}
+		err = s.userRepo.Create(ctx, user)
+		if errors.Is(err, userRepo.ErrUsernameTaken) && derived && attempt == 0 {
+			continue
+		}
+		break
+	}
 	if err != nil {
+		switch {
+		case errors.Is(err, userRepo.ErrEmailTaken):
+			return nil, ErrEmailAlreadyExists
+		case errors.Is(err, userRepo.ErrUsernameTaken):
+			return nil, ErrUsernameAlreadyExists
+		}
 		return nil, err
 	}
 
 	// No role is assigned here: a self-registered user starts with zero
 	// access until a super_admin grants a role.
-	logger.Info("User signed up",
-		logger.String("user_id", user.ID),
-		logger.String("email", user.Email))
+	logger.Info("User signed up", logger.String("user_id", user.ID))
+	s.record(ctx, audit.ActionSignUp, user.ID, nil)
+
+	// The first code goes out even if a resend for this address is cooling
+	// down (asked for before the account existed). The account exists
+	// either way; a failed email can be asked for again.
+	resend := resendKey(codeKindVerify, user.Email)
+	_ = s.holdResend(ctx, resend)
+	if err := s.sendVerificationCode(ctx, user); err != nil {
+		logger.Error("Failed to send verification code", logger.String("user_id", user.ID), logger.Err(err))
+	}
 
 	return &dto.SignUpResponse{
-		Message: "User registered successfully.",
-		User: dto.UserInfo{
-			ID:       user.ID,
-			Email:    user.Email,
-			Username: user.Username,
-			FullName: user.FullName,
-		},
+		User:         toUserInfo(user, nil),
+		Verification: dto.VerificationSent{Email: user.Email, CodeTicket: s.ticket(ctx, resend)},
 	}, nil
 }
 
-// SignIn authenticates a user and returns tokens
+// SignIn authenticates a user and returns tokens.
+//
+// The password is checked before anything about the account is revealed:
+// a caller who does not know it gets ErrInvalidCredentials whether the
+// login is unknown, the password wrong, or the account locked, and an
+// unknown login costs as much time as a wrong password.
 func (s *AuthService) SignIn(ctx context.Context, req *dto.SignInRequest, deviceInfo domain.DeviceInfo, ipAddress string) (*dto.SignInResponse, error) {
-	// Find user by email or username
-	user, err := s.userRepo.FindByEmailOrUsername(ctx, req.Login)
+	user, err := s.findByLogin(ctx, req.Login)
 	if err != nil {
 		return nil, err
 	}
 	if user == nil {
-		logger.Warn("User not found", logger.String("login", req.Login))
+		crypto.SpendComparison(req.Password)
+		s.audit.Record(ctx, audit.Entry{Action: audit.ActionSignInRefused, Details: map[string]any{"reason": "unknown_login"}})
 		return nil, ErrInvalidCredentials
 	}
 
-	// Check if user is active
-	if !user.IsActive {
-		logger.Warn("Inactive user login attempt", logger.String("user_id", user.ID))
-		return nil, ErrUserNotActive
+	attempt, err := s.reservePasswordAttempt(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	if attempt == 0 {
+		// Locked: not even a right password gets in, and the answer must
+		// not tell a guesser it was right.
+		crypto.SpendComparison(req.Password)
+		logger.Warn("Sign-in attempt on a locked account", logger.String("user_id", user.ID))
+		s.record(ctx, audit.ActionSignInRefused, user.ID, map[string]any{"reason": "locked"})
+		return nil, ErrInvalidCredentials
 	}
 
-	// Check if user is locked
-	if user.IsLocked() {
-		logger.Warn("Locked user login attempt", logger.String("user_id", user.ID))
-		return nil, ErrUserLocked
-	}
-
-	// Check email verification if required
-	if s.config != nil && s.config.Security.EmailVerificationRequired && !user.IsEmailVerified {
-		logger.Warn("Unverified email login attempt", logger.String("user_id", user.ID))
-		return nil, ErrEmailNotVerified
-	}
-
-	// Verify password
 	if !crypto.ComparePassword(user.PasswordHash, req.Password) {
-		// Increment failed login count
-		_ = s.userRepo.IncrementFailedLogin(ctx, user.ID)
+		s.recordWrongPassword(ctx, user, attempt, "sign_in")
+		return nil, ErrInvalidCredentials
+	}
 
-		// Lock user if too many failed attempts
-		if user.FailedLoginCount+1 >= MaxFailedLoginAttempts {
-			lockUntil := time.Now().Add(LockDuration)
-			_ = s.userRepo.LockUser(ctx, user.ID, lockUntil)
-			logger.Warn("User locked due to failed login attempts", logger.String("user_id", user.ID))
+	var (
+		sess    *session
+		refused error
+		reason  string
+	)
+	// The clear locks the user row, so a password reset, claim or "sign out
+	// everywhere" running meanwhile either lands before it — and this
+	// sign-in fails — or waits and ends the session issued here.
+	err = database.WithTx(ctx, s.db, func(ctx context.Context) error {
+		// The password is right, which ends the run of wrong ones — unless a
+		// parallel guess locked the account since this attempt was counted,
+		// or the password changed since it was read; then this sign-in loses
+		// too.
+		cleared, err := s.userRepo.ClearPasswordAttempts(ctx, user.ID, user.PasswordHash, attempt)
+		if err != nil {
+			return err
+		}
+		if !cleared {
+			refused, reason = ErrInvalidCredentials, "locked"
+			return nil
 		}
 
-		logger.Warn("Invalid password", logger.String("user_id", user.ID))
-		return nil, ErrInvalidCredentials
-	}
-
-	// Update last login
-	_ = s.userRepo.UpdateLastLogin(ctx, user.ID)
-
-	// Get user roles and permissions
-	var roles, permissions []string
-	if s.roleRepo != nil {
-		roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID)
-		permissions, _ = s.roleRepo.GetUserPermissions(ctx, user.ID)
-	}
-
-	// Generate access token
-	fullName := ""
-	if user.FullName != nil {
-		fullName = *user.FullName
-	}
-	isSuperAdmin := containsRole(roles, jwt.RoleSuperAdmin)
-	accessToken, err := jwt.GenerateToken(user.ID, user.Email, user.Username, fullName, isSuperAdmin, roles)
+		// From here on the caller knows the password. The row is locked:
+		// this read is current.
+		current, err := s.userRepo.FindByID(ctx, user.ID)
+		if err != nil {
+			return err
+		}
+		switch {
+		case current == nil || !current.IsActive:
+			refused, reason = ErrUserNotActive, "inactive"
+			return nil
+		case s.security.EmailVerificationRequired && !current.IsEmailVerified:
+			refused, reason = &EmailNotVerifiedError{Email: current.Email}, "email_unverified"
+			return nil
+		}
+		user = current
+		if err := s.userRepo.TouchLastLogin(ctx, user.ID); err != nil {
+			return err
+		}
+		sess, err = s.startSession(ctx, user, deviceInfo, ipAddress)
+		return err
+	})
 	if err != nil {
-		logger.Error("Failed to generate access token", logger.Err(err))
+		return nil, err
+	}
+	// A refused sign-in still commits the clear.
+	if refused != nil {
+		s.record(ctx, audit.ActionSignInRefused, user.ID, map[string]any{"reason": reason})
+		return nil, refused
+	}
+
+	logger.Info("User signed in", logger.String("user_id", user.ID))
+	s.record(ctx, audit.ActionSignIn, user.ID, map[string]any{"method": "password", "session_id": sess.sessionID})
+
+	return s.signInResponse(ctx, user, sess)
+}
+
+// EmailNotVerifiedError refuses a sign-in with the right password into an
+// account whose email is not verified yet. It names the address, so a
+// client that signed in by username knows where the code goes.
+type EmailNotVerifiedError struct {
+	Email string
+}
+
+func (e *EmailNotVerifiedError) Error() string { return ErrEmailNotVerified.Error() }
+func (e *EmailNotVerifiedError) Unwrap() error { return ErrEmailNotVerified }
+
+// signInResponse is what a new session answers with.
+func (s *AuthService) signInResponse(ctx context.Context, user *userDomain.User, sess *session) (*dto.SignInResponse, error) {
+	info, err := s.userInfo(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	return &dto.SignInResponse{
+		AccessToken:  sess.accessToken,
+		RefreshToken: sess.refreshToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    accessTokenExpiresIn(),
+		User:         info,
+		Roles:        sess.roles,
+		Permissions:  sess.permissions,
+	}, nil
+}
+
+// reservePasswordAttempt counts a password check — at sign-in or a
+// password change — before it is made, so a burst of parallel guesses gets
+// no more checks than MAX_LOGIN_ATTEMPTS: every guess is numbered before
+// any of them is checked, and the one that reaches the limit locks the
+// account at once. It returns the attempt's number, or 0 when the account
+// is locked and nothing may be checked.
+func (s *AuthService) reservePasswordAttempt(ctx context.Context, userID string) (int, error) {
+	now := time.Now()
+	return s.userRepo.ReservePasswordAttempt(ctx, userID, s.maxLoginAttempts(), now, now.Add(s.lockoutDuration()))
+}
+
+// recordWrongPassword reports a wrong password checked as attempt for
+// purpose ("sign_in", "password_change", "reauth"). The attempt that
+// reached the limit has locked the account; the sign-in answer does not
+// say so, so the owner learns it by email.
+func (s *AuthService) recordWrongPassword(ctx context.Context, user *userDomain.User, attempt int, purpose string) {
+	s.record(ctx, audit.ActionWrongPassword, user.ID, map[string]any{"purpose": purpose, "attempt": attempt})
+	if attempt < s.maxLoginAttempts() {
+		logger.Warn("Invalid password", logger.String("user_id", user.ID), logger.Int("attempt", attempt))
+		return
+	}
+	logger.Warn("User locked due to failed login attempts", logger.String("user_id", user.ID))
+	s.record(ctx, audit.ActionAccountLocked, user.ID, map[string]any{"locked_for": s.lockoutDuration().String()})
+	// Only one attempt per lock reaches the limit: the rest are refused
+	// unchecked until it expires.
+	_ = s.mailer.SendAccountLockedEmail(user.Email, displayName(user), s.lockoutDuration())
+}
+
+// session is a freshly issued token pair plus what the client shows.
+type session struct {
+	sessionID    string
+	accessToken  string
+	refreshToken string
+	roles        []string
+	permissions  []string
+}
+
+// startSession starts a sign-in session: a new session id, an access
+// token and a refresh token.
+func (s *AuthService) startSession(ctx context.Context, user *userDomain.User, deviceInfo domain.DeviceInfo, ipAddress string) (*session, error) {
+	sessionID := uuid.New().String()
+	sess, err := s.issueAccessToken(ctx, user, sessionID)
+	if err != nil {
 		return nil, err
 	}
 
-	// Generate refresh token
-	refreshTokenStr, err := token.GenerateSecureToken(32)
-	if err != nil {
-		logger.Error("Failed to generate refresh token", logger.Err(err))
-		return nil, err
-	}
-
-	// Store refresh token hash in database
-	refreshToken := &domain.RefreshToken{
-		ID:         uuid.New().String(),
-		UserID:     user.ID,
-		TokenHash:  hashToken(refreshTokenStr),
+	sess.refreshToken, err = s.storeRefreshToken(ctx, user.ID, domain.RefreshToken{
+		SessionID:  sessionID,
+		SignedInAt: time.Now(),
 		DeviceInfo: deviceInfo,
 		IPAddress:  &ipAddress,
-		ExpiresAt:  time.Now().Add(RefreshTokenExpiry),
-		CreatedAt:  time.Now(),
-	}
-
-	err = s.refreshTokenRepo.Create(ctx, refreshToken)
+	})
 	if err != nil {
-		logger.Error("Failed to store refresh token", logger.Err(err))
 		return nil, err
 	}
 
-	logger.Info("User signed in",
-		logger.String("user_id", user.ID),
-		logger.String("email", user.Email))
+	return sess, nil
+}
 
-	// A user without roles (e.g. fresh signup) must still get JSON arrays,
-	// not null — mirrors issueGoogleTokens.
-	if permissions == nil {
-		permissions = []string{}
+// issueAccessToken signs an access token for user in session sessionID.
+// Roles and the super admin flag in it are informational; permissions
+// come from the live subject.
+func (s *AuthService) issueAccessToken(ctx context.Context, user *userDomain.User, sessionID string) (*session, error) {
+	subject, err := s.subjects.GetSubject(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	roles, err := s.roleRepo.GetUserRoleNames(ctx, user.ID)
+	if err != nil {
+		return nil, err
 	}
 	if roles == nil {
 		roles = []string{}
 	}
 
-	return &dto.SignInResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshTokenStr,
-		TokenType:    "Bearer",
-		ExpiresIn:    AccessTokenExpiryHours * 3600,
-		User: dto.UserInfo{
-			ID:       user.ID,
-			Email:    user.Email,
-			Username: user.Username,
-			FullName: user.FullName,
-		},
-		Roles:       roles,
-		Permissions: permissions,
-	}, nil
-}
-
-// RefreshToken refreshes the access token using a refresh token
-func (s *AuthService) RefreshToken(ctx context.Context, refreshTokenStr string) (*dto.RefreshTokenResponse, error) {
-	tokenHash := hashToken(refreshTokenStr)
-
-	// Find refresh token
-	refreshToken, err := s.refreshTokenRepo.FindByTokenHash(ctx, tokenHash)
-	if err != nil {
-		return nil, err
-	}
-	if refreshToken == nil {
-		return nil, ErrInvalidRefreshToken
-	}
-
-	// Check if token is revoked
-	if refreshToken.IsRevoked() {
-		return nil, ErrRefreshTokenRevoked
-	}
-
-	// Check if token is expired
-	if refreshToken.IsExpired() {
-		return nil, ErrRefreshTokenExpired
-	}
-
-	// Get user
-	user, err := s.userRepo.FindByID(ctx, refreshToken.UserID)
-	if err != nil {
-		return nil, err
-	}
-	if user == nil || !user.IsActive {
-		return nil, ErrUserNotActive
-	}
-
-	// Update last used
-	_ = s.refreshTokenRepo.UpdateLastUsed(ctx, refreshToken.ID)
-
-	// Get user roles. Permissions are not needed here — the refresh
-	// response returns only the new token pair, and permissions are
-	// looked up from Redis on subsequent requests via authz.
-	var roles []string
-	if s.roleRepo != nil {
-		roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID)
-	}
-
-	// Generate new access token
 	fullName := ""
 	if user.FullName != nil {
 		fullName = *user.FullName
 	}
-	isSuperAdmin := containsRole(roles, jwt.RoleSuperAdmin)
-	accessToken, err := jwt.GenerateToken(user.ID, user.Email, user.Username, fullName, isSuperAdmin, roles)
+	accessToken, err := jwt.GenerateToken(user.ID, user.Email, user.Username, fullName, subject.SuperAdmin, roles, sessionID)
 	if err != nil {
 		logger.Error("Failed to generate access token", logger.Err(err))
 		return nil, err
 	}
 
-	// Generate new refresh token (token rotation)
-	newRefreshTokenStr, err := token.GenerateSecureToken(32)
+	return &session{sessionID: sessionID, accessToken: accessToken, roles: roles, permissions: subject.Permissions}, nil
+}
+
+// storeRefreshToken stores a new refresh token for userID and returns it;
+// only its hash is stored. t describes the session (SessionID,
+// SignedInAt, DeviceInfo, IPAddress) and, on rotation, the token it
+// replaces (RotatedFromID).
+func (s *AuthService) storeRefreshToken(ctx context.Context, userID string, t domain.RefreshToken) (string, error) {
+	refreshTokenStr, err := token.GenerateSecureToken(32)
 	if err != nil {
-		logger.Error("Failed to generate new refresh token", logger.Err(err))
-		return nil, err
+		logger.Error("Failed to generate refresh token", logger.Err(err))
+		return "", err
 	}
 
-	// Revoke old refresh token
-	_ = s.refreshTokenRepo.Revoke(ctx, refreshToken.ID)
-
-	// Store new refresh token
-	newRefreshToken := &domain.RefreshToken{
-		ID:         uuid.New().String(),
-		UserID:     user.ID,
-		TokenHash:  hashToken(newRefreshTokenStr),
-		DeviceInfo: refreshToken.DeviceInfo,
-		IPAddress:  refreshToken.IPAddress,
-		ExpiresAt:  time.Now().Add(RefreshTokenExpiry),
-		CreatedAt:  time.Now(),
+	now := time.Now()
+	t.ID = uuid.New().String()
+	t.UserID = userID
+	t.TokenHash = token.Hash(refreshTokenStr)
+	t.ExpiresAt = now.Add(s.refreshTokenExpiration())
+	t.CreatedAt = now
+	if err := s.refreshTokenRepo.Create(ctx, &t); err != nil {
+		return "", err
 	}
 
-	err = s.refreshTokenRepo.Create(ctx, newRefreshToken)
+	return refreshTokenStr, nil
+}
+
+// RefreshToken rotates a refresh token: the presented token is revoked and
+// a new access + refresh pair of the same session is issued.
+func (s *AuthService) RefreshToken(ctx context.Context, refreshTokenStr string) (*dto.RefreshTokenResponse, error) {
+	tokenHash := token.Hash(refreshTokenStr)
+
+	var (
+		claimed *domain.RefreshToken
+		sess    *session
+		refused error
+	)
+	// The old token's revocation, its successor and the new access token
+	// commit together: no reader ever sees the session without a live
+	// token, which would make it look ended (see
+	// authz.Subject.EndedSessions), and a failure leaves the presented
+	// token usable for a retry.
+	err := database.WithTx(ctx, s.db, func(ctx context.Context) error {
+		presented, err := s.refreshTokenRepo.FindByTokenHash(ctx, tokenHash)
+		if err != nil || presented == nil {
+			return err
+		}
+		// Locked before the claim: a change ending every session of the
+		// user waits for this rotation and then revokes its new token, or
+		// has revoked the presented one already.
+		user, err := s.userRepo.FindByIDForUpdate(ctx, presented.UserID)
+		if err != nil {
+			return err
+		}
+
+		// Claim the token atomically: of two requests presenting the
+		// same token, exactly one gets it.
+		if claimed, err = s.refreshTokenRepo.Claim(ctx, tokenHash); err != nil || claimed == nil {
+			return err
+		}
+
+		// Refused, the claimed token stays consumed: the session is over.
+		switch {
+		case user == nil || !user.IsActive:
+			refused = ErrUserNotActive
+			return nil
+		case s.security.EmailVerificationRequired && !user.IsEmailVerified:
+			// Verification was required, or withdrawn, after sign-in.
+			refused = ErrEmailNotVerified
+			return nil
+		}
+
+		refreshToken, err := s.storeRefreshToken(ctx, user.ID, domain.RefreshToken{
+			SessionID:     claimed.SessionID,
+			SignedInAt:    claimed.SignedInAt,
+			DeviceInfo:    claimed.DeviceInfo,
+			IPAddress:     claimed.IPAddress,
+			RotatedFromID: &claimed.ID,
+		})
+		if err != nil {
+			return err
+		}
+		// After the successor is stored: a subject loaded now must not see
+		// the session without a live token.
+		if sess, err = s.issueAccessToken(ctx, user, claimed.SessionID); err != nil {
+			return err
+		}
+		sess.refreshToken = refreshToken
+		return nil
+	})
 	if err != nil {
-		logger.Error("Failed to store new refresh token", logger.Err(err))
 		return nil, err
+	}
+	if claimed == nil {
+		return nil, s.rejectUnclaimable(ctx, tokenHash)
+	}
+	if refused != nil {
+		// The session is over: its access token goes with it.
+		s.invalidateSubject(ctx, claimed.UserID)
+		return nil, refused
 	}
 
 	return &dto.RefreshTokenResponse{
-		AccessToken:  accessToken,
-		RefreshToken: newRefreshTokenStr,
+		AccessToken:  sess.accessToken,
+		RefreshToken: sess.refreshToken,
 		TokenType:    "Bearer",
-		ExpiresIn:    AccessTokenExpiryHours * 3600,
+		ExpiresIn:    accessTokenExpiresIn(),
 	}, nil
 }
 
-// Logout revokes a refresh token
-func (s *AuthService) Logout(ctx context.Context, refreshTokenStr string) error {
-	tokenHash := hashToken(refreshTokenStr)
-
-	err := s.refreshTokenRepo.RevokeByTokenHash(ctx, tokenHash)
+// rejectUnclaimable explains why a refresh token could not be claimed.
+// A token that was rotated more than refreshReuseGrace ago is being
+// replayed — whoever presents it copied it — so every session of the
+// user is revoked.
+func (s *AuthService) rejectUnclaimable(ctx context.Context, tokenHash string) error {
+	refreshToken, err := s.refreshTokenRepo.FindByTokenHash(ctx, tokenHash)
 	if err != nil {
-		logger.Error("Failed to revoke refresh token", logger.Err(err))
 		return err
 	}
+	if refreshToken == nil {
+		return ErrInvalidRefreshToken
+	}
+	if !refreshToken.IsRevoked() {
+		// Unclaimable but not revoked: only expiry is left.
+		return ErrRefreshTokenExpired
+	}
 
+	rotated, err := s.refreshTokenRepo.WasRotated(ctx, refreshToken.ID)
+	if err != nil {
+		return err
+	}
+	if rotated && time.Since(*refreshToken.RevokedAt) > refreshReuseGrace {
+		logger.Warn("Rotated refresh token presented again; revoking all sessions",
+			logger.String("user_id", refreshToken.UserID),
+			logger.String("token_id", refreshToken.ID))
+		s.record(ctx, audit.ActionRefreshTokenReused, refreshToken.UserID, map[string]any{"session_id": refreshToken.SessionID})
+		if err := s.RevokeAllSessions(ctx, refreshToken.UserID); err != nil {
+			logger.Error("Failed to revoke sessions after refresh token reuse", logger.Err(err))
+		}
+	}
+
+	return ErrRefreshTokenRevoked
+}
+
+// Logout ends the session one of the caller's refresh tokens belongs to:
+// the token is revoked, and the session's access tokens are refused from
+// the next request on.
+func (s *AuthService) Logout(ctx context.Context, userID, refreshTokenStr string) error {
+	sessionID, err := s.refreshTokenRepo.RevokeByTokenHash(ctx, userID, token.Hash(refreshTokenStr))
+	if err != nil {
+		return err
+	}
+	if sessionID != "" {
+		s.invalidateSubject(ctx, userID)
+		s.record(ctx, audit.ActionLogout, userID, map[string]any{"session_id": sessionID})
+	}
 	return nil
 }
 
-// LogoutAll revokes all refresh tokens for a user
+// LogoutAll ends every session of the user, access tokens included.
 func (s *AuthService) LogoutAll(ctx context.Context, userID string) error {
-	err := s.refreshTokenRepo.RevokeAllByUserID(ctx, userID)
-	if err != nil {
-		logger.Error("Failed to revoke all refresh tokens", logger.Err(err))
+	if err := s.RevokeAllSessions(ctx, userID); err != nil {
 		return err
 	}
-
+	s.record(ctx, audit.ActionLogoutAll, userID, nil)
 	return nil
+}
+
+// RevokeAllSessions revokes every refresh token of the user and rejects
+// every access token issued so far. Used for sign-out everywhere, a
+// password change, deactivation, and a detected stolen refresh token.
+func (s *AuthService) RevokeAllSessions(ctx context.Context, userID string) error {
+	err := database.WithTx(ctx, s.db, func(ctx context.Context) error {
+		return s.revokeSessionsTx(ctx, userID)
+	})
+	if err != nil {
+		return err
+	}
+	s.invalidateSubject(ctx, userID)
+	return nil
+}
+
+// revokeSessionsTx moves the session epoch and revokes the user's refresh
+// tokens, in the transaction ctx carries. The caller invalidates the authz
+// cache once that transaction has committed (invalidateSubject): done
+// earlier, a concurrent request could cache the old epoch again.
+//
+// The user row is locked first, which waits for a sign-in or refresh
+// holding it (see UserRepository.FindByIDForUpdate): the epoch, taken
+// after that, is later than the access token such a request issued, the
+// revocation sees its refresh token, and the next one waits for this
+// transaction.
+func (s *AuthService) revokeSessionsTx(ctx context.Context, userID string) error {
+	if _, err := s.userRepo.FindByIDForUpdate(ctx, userID); err != nil {
+		return err
+	}
+	if err := s.userRepo.RevokeTokensIssuedBefore(ctx, userID, time.Now()); err != nil {
+		return err
+	}
+	return s.refreshTokenRepo.RevokeAllByUserID(ctx, userID)
+}
+
+// invalidateSubject drops the cached authz state, which carries the old
+// session epoch. A failure is logged: the TTL heals the cache.
+func (s *AuthService) invalidateSubject(ctx context.Context, userID string) {
+	if err := s.subjects.InvalidateUser(ctx, userID); err != nil {
+		logger.Warn("authz cache invalidation failed",
+			logger.String("user_id", userID),
+			logger.Err(err))
+	}
+}
+
+// record writes an audit entry about the account userID. The actor is
+// the caller in ctx (see middleware.JWTAuth); a request made before
+// anyone is signed in — sign-up, sign-in, an emailed link — is recorded
+// as acting on its own account.
+func (s *AuthService) record(ctx context.Context, action, userID string, details map[string]any) {
+	e := audit.Entry{Action: action, TargetType: audit.TargetUser, TargetID: userID, Details: details}
+	if audit.ActorID(ctx) == "" {
+		e.ActorID = userID
+	}
+	s.audit.Record(ctx, e)
+}
+
+// PurgeExpiredTokens deletes refresh tokens, emailed codes and reset
+// grants that can no longer be used, and returns how many went.
+func (s *AuthService) PurgeExpiredTokens(ctx context.Context) (int64, error) {
+	now := time.Now()
+	refresh, err := s.refreshTokenRepo.DeleteExpiredBefore(ctx, now)
+	if err != nil {
+		return 0, err
+	}
+	codes, err := s.accountTokenRepo.DeleteExpiredBefore(ctx, now)
+	if err != nil {
+		return refresh, err
+	}
+	return refresh + codes, nil
 }
 
 // GetMe returns the signed-in user's current profile, roles, and
-// *effective* permissions. Permissions come from the authz cache (Redis)
-// when wired; otherwise the role repo is consulted directly. Intended for
-// FE rehydration after a page reload or re-sync after an unexpected 403.
-func (s *AuthService) GetMe(ctx context.Context, userID string, isSuperAdmin bool) (*dto.MeResponse, error) {
+// effective permissions from the caller's live subject. Intended for FE
+// rehydration after a page reload or re-sync after an unexpected 403.
+func (s *AuthService) GetMe(ctx context.Context, userID string, subject authz.Subject) (*dto.MeResponse, error) {
 	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -436,484 +764,112 @@ func (s *AuthService) GetMe(ctx context.Context, userID string, isSuperAdmin boo
 		return nil, ErrUserNotActive
 	}
 
-	resp := &dto.MeResponse{
-		User: dto.UserInfo{
-			ID:       user.ID,
-			Email:    user.Email,
-			Username: user.Username,
-			FullName: user.FullName,
-		},
-		IsSuperAdmin: isSuperAdmin,
-	}
-
-	// Roles — always from the role repo. The list is small so there's
-	// no cache layer in front of it.
-	if s.roleRepo != nil {
-		resp.Roles, _ = s.roleRepo.GetUserRoleNames(ctx, userID)
-	}
-
-	// Permissions — prefer the Redis-backed authz cache. Fall back to
-	// the role repo if the reader isn't wired (tests / bootstrapping).
-	switch {
-	case s.permissionReader != nil:
-		resp.Permissions, err = s.permissionReader.GetPermissions(ctx, userID)
-		if err != nil {
-			logger.Warn("GetMe: permission reader failed, falling back to role repo", logger.Err(err))
-			if s.roleRepo != nil {
-				resp.Permissions, _ = s.roleRepo.GetUserPermissions(ctx, userID)
-			}
-		}
-	case s.roleRepo != nil:
-		resp.Permissions, _ = s.roleRepo.GetUserPermissions(ctx, userID)
-	}
-
-	if resp.Permissions == nil {
-		resp.Permissions = []string{}
-	}
-	if resp.Roles == nil {
-		resp.Roles = []string{}
-	}
-
-	return resp, nil
-}
-
-// containsRole checks if a role exists in the roles slice
-func containsRole(roles []string, target string) bool {
-	for _, r := range roles {
-		if r == target {
-			return true
-		}
-	}
-	return false
-}
-
-// ─── Google sign-in ─────────────────────────────────────────────────
-//
-// SignInWithGoogle is the single entry point for both sign-in and
-// sign-up via a Firebase Google ID token. Flow:
-//
-//  1. Verify the ID token via Firebase Admin.
-//  2. Look up core.user_identities by (google, firebase_uid).
-//     - Found → refresh the identity snapshot, sign that user in.
-//  3. Not found → look up core.users by email.
-//     - Found → link the Google identity to the existing account,
-//       then sign that user in. The pre-existing user keeps their
-//       roles — no auto-provisioning here.
-//  4. Not found at all → first-time Google user:
-//       a) create a new core.users row (no password, no role —
-//          same as SignUp)
-//       b) link the Google identity
-//       c) sign the new user in
-//
-// All four branches return a *dto.GoogleSignInResponse with
-// `is_new_user` distinguishing case (4) from the rest. Token issuance
-// (JWT + refresh) is shared with the email/password path.
-func (s *AuthService) SignInWithGoogle(
-	ctx context.Context,
-	req *dto.GoogleSignInRequest,
-	deviceInfo domain.DeviceInfo,
-	ipAddress string,
-) (*dto.GoogleSignInResponse, error) {
-	if s.firebase == nil {
-		return nil, ErrFirebaseNotConfigured
-	}
-	if s.userIdentityRepo == nil {
-		// Mis-wired bootstrap — refuse to run a half-configured flow.
-		return nil, errors.New("user identity repository not set")
-	}
-
-	// 1. Verify token. anything that returns here has a valid
-	// signature, audience, and expiry per Firebase Admin SDK.
-	tok, err := s.firebase.VerifyIDToken(ctx, req.IDToken)
-	if err != nil {
-		logger.Warn("Firebase ID token verification failed", logger.Err(err))
-		return nil, ErrInvalidGoogleToken
-	}
-
-	// Defence in depth: only accept tokens that actually came from a
-	// Google sign-in (not, say, a Firebase email-link flow that happens
-	// to be enabled in the same project).
-	if tok.SignInProvider != "" && tok.SignInProvider != firebaseSignInProviderGoogle {
-		logger.Warn("Rejected Firebase token with unexpected sign-in provider",
-			logger.String("sign_in_provider", tok.SignInProvider))
-		return nil, ErrUnexpectedProvider
-	}
-
-	if tok.Email == "" {
-		return nil, ErrGoogleEmailMissing
-	}
-	email := strings.ToLower(strings.TrimSpace(tok.Email))
-
-	// 2. Identity already linked → returning user.
-	identity, err := s.userIdentityRepo.FindByProvider(ctx, userDomain.IdentityProviderGoogle, tok.UID)
+	roles, err := s.roleRepo.GetUserRoleNames(ctx, userID)
 	if err != nil {
 		return nil, err
-	}
-
-	var (
-		user      *userDomain.User
-		isNewUser bool
-	)
-
-	switch {
-	case identity != nil:
-		// Returning Google user.
-		user, err = s.userRepo.FindByID(ctx, identity.UserID)
-		if err != nil {
-			return nil, err
-		}
-		if user == nil || !user.IsActive || user.DeletedAt != nil {
-			return nil, ErrUserNotActive
-		}
-		// Refresh the snapshot so audit/debug fields stay current.
-		_ = s.userIdentityRepo.UpdateOnLogin(ctx, identity.ID, &email, marshalProfile(tok))
-
-	default:
-		// 3. No identity yet — try linking to an existing user by email.
-		existing, err := s.userRepo.FindByEmail(ctx, email)
-		if err != nil {
-			return nil, err
-		}
-		if existing != nil {
-			if !existing.IsActive || existing.DeletedAt != nil {
-				return nil, ErrUserNotActive
-			}
-			user = existing
-			if err := s.linkGoogleIdentity(ctx, user.ID, tok, email); err != nil {
-				return nil, err
-			}
-		} else {
-			// 4. Brand-new user — full provisioning.
-			user, err = s.provisionGoogleUser(ctx, tok, email)
-			if err != nil {
-				return nil, err
-			}
-			isNewUser = true
-		}
-	}
-
-	// Update last_login_at on the user row (mirrors SignIn).
-	_ = s.userRepo.UpdateLastLogin(ctx, user.ID)
-
-	// From here on the response build mirrors SignIn: load roles,
-	// permissions; issue JWT + refresh token.
-	return s.issueGoogleTokens(ctx, user, isNewUser, deviceInfo, ipAddress)
-}
-
-// provisionGoogleUser creates the user row and links the Google
-// identity. Like SignUp, no role is assigned.
-func (s *AuthService) provisionGoogleUser(
-	ctx context.Context,
-	tok *pkgfirebase.VerifiedToken,
-	email string,
-) (*userDomain.User, error) {
-	now := time.Now()
-
-	// Username: derived from email local-part. Collisions resolved by
-	// appending a 4-hex suffix.
-	username, err := s.allocateUsernameFromEmail(ctx, email)
-	if err != nil {
-		return nil, err
-	}
-
-	// Names: prefer the provider's `name` claim; if it's empty (rare
-	// for Google) fall back to the email local-part.
-	displayName := strings.TrimSpace(tok.Name)
-	if displayName == "" {
-		displayName = usernameFromEmail(email)
-	}
-
-	var avatarURL *string
-	if tok.Picture != "" {
-		pic := tok.Picture
-		avatarURL = &pic
-	}
-
-	full := displayName
-	user := &userDomain.User{
-		ID:              uuid.New().String(),
-		Email:           email,
-		Username:        username,
-		FullName:        &full,
-		AvatarURL:       avatarURL,
-		IsActive:        true,
-		// Google verifies emails itself before issuing an ID token —
-		// trust the claim and mark the local row verified so the user
-		// can use the app immediately even if EMAIL_VERIFICATION_REQUIRED
-		// is on.
-		IsEmailVerified: tok.EmailVerified,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}
-	if tok.EmailVerified {
-		v := now
-		user.EmailVerifiedAt = &v
-	}
-
-	if err := s.userRepo.CreateExternal(ctx, user); err != nil {
-		return nil, err
-	}
-
-	// Link the Google identity after the user row exists so a failed
-	// insert doesn't leave an orphan identity row.
-	if err := s.linkGoogleIdentity(ctx, user.ID, tok, email); err != nil {
-		return nil, err
-	}
-
-	logger.Info("User provisioned via Google sign-in",
-		logger.String("user_id", user.ID),
-		logger.String("email", user.Email))
-
-	return user, nil
-}
-
-// linkGoogleIdentity inserts the (google, firebase_uid) row for a user
-// that already exists in core.users. Idempotent: callers should not
-// reach here twice for the same user, but the DB UNIQUE will catch any
-// race that slips through.
-func (s *AuthService) linkGoogleIdentity(
-	ctx context.Context,
-	userID string,
-	tok *pkgfirebase.VerifiedToken,
-	email string,
-) error {
-	now := time.Now()
-	identity := &userDomain.UserIdentity{
-		ID:             uuid.New().String(),
-		UserID:         userID,
-		Provider:       userDomain.IdentityProviderGoogle,
-		ProviderUserID: tok.UID,
-		Email:          &email,
-		RawProfile:     marshalProfile(tok),
-		LastLoginAt:    &now,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	if err := s.userIdentityRepo.Create(ctx, identity); err != nil {
-		logger.Error("Failed to link google identity", logger.Err(err))
-		return err
-	}
-	return nil
-}
-
-// issueGoogleTokens packages the response: loads roles, permissions;
-// mints access + refresh tokens; persists refresh.
-// Logic mirrors the tail of SignIn — kept separate so the Google flow
-// can attach `is_new_user`.
-func (s *AuthService) issueGoogleTokens(
-	ctx context.Context,
-	user *userDomain.User,
-	isNewUser bool,
-	deviceInfo domain.DeviceInfo,
-	ipAddress string,
-) (*dto.GoogleSignInResponse, error) {
-	var roles, permissions []string
-	if s.roleRepo != nil {
-		roles, _ = s.roleRepo.GetUserRoleNames(ctx, user.ID)
-		permissions, _ = s.roleRepo.GetUserPermissions(ctx, user.ID)
-	}
-
-	fullName := ""
-	if user.FullName != nil {
-		fullName = *user.FullName
-	}
-	isSuperAdmin := containsRole(roles, jwt.RoleSuperAdmin)
-	accessToken, err := jwt.GenerateToken(
-		user.ID, user.Email, user.Username, fullName, isSuperAdmin, roles,
-	)
-	if err != nil {
-		logger.Error("Failed to generate access token", logger.Err(err))
-		return nil, err
-	}
-
-	refreshTokenStr, err := token.GenerateSecureToken(32)
-	if err != nil {
-		logger.Error("Failed to generate refresh token", logger.Err(err))
-		return nil, err
-	}
-
-	refreshToken := &domain.RefreshToken{
-		ID:         uuid.New().String(),
-		UserID:     user.ID,
-		TokenHash:  hashToken(refreshTokenStr),
-		DeviceInfo: deviceInfo,
-		IPAddress:  &ipAddress,
-		ExpiresAt:  time.Now().Add(RefreshTokenExpiry),
-		CreatedAt:  time.Now(),
-	}
-	if err := s.refreshTokenRepo.Create(ctx, refreshToken); err != nil {
-		logger.Error("Failed to store refresh token", logger.Err(err))
-		return nil, err
-	}
-
-	if permissions == nil {
-		permissions = []string{}
 	}
 	if roles == nil {
 		roles = []string{}
 	}
+	permissions := subject.Permissions
+	if permissions == nil {
+		permissions = []string{}
+	}
 
-	return &dto.GoogleSignInResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshTokenStr,
-		TokenType:    "Bearer",
-		ExpiresIn:    AccessTokenExpiryHours * 3600,
-		IsNewUser:    isNewUser,
-		User: dto.UserInfo{
-			ID:       user.ID,
-			Email:    user.Email,
-			Username: user.Username,
-			FullName: user.FullName,
-		},
-		Roles:       roles,
-		Permissions: permissions,
+	info, err := s.userInfo(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	return &dto.MeResponse{
+		User:         info,
+		Roles:        roles,
+		Permissions:  permissions,
+		IsSuperAdmin: subject.SuperAdmin,
 	}, nil
 }
 
-// allocateUsernameFromEmail derives a unique username from the email
-// local-part. Adds a 4-hex suffix on collision; gives up after a few
-// tries (would only happen under sustained collision pressure, which
-// is essentially impossible with random suffixes).
-func (s *AuthService) allocateUsernameFromEmail(ctx context.Context, email string) (string, error) {
-	base := sanitizeUsername(usernameFromEmail(email))
-	if base == "" {
-		base = "user-" + shortHex(4)
-	}
-
-	candidate := base
-	for attempt := 0; attempt < 5; attempt++ {
-		exists, err := s.userRepo.UsernameExists(ctx, candidate, nil)
-		if err != nil {
-			return "", err
-		}
-		if !exists {
-			return candidate, nil
-		}
-		suffix := "-" + shortHex(4)
-		maxBase := 100 - len(suffix) // core.users.username is VARCHAR(100)
-		if len(base) > maxBase {
-			base = base[:maxBase]
-		}
-		candidate = base + suffix
-	}
-	return "", errors.New("could not allocate unique username after retries")
-}
-
-// usernameFromEmail returns the part before '@', lowercased and
-// trimmed. Caller still feeds the result through sanitizeUsername.
-func usernameFromEmail(email string) string {
-	at := strings.IndexByte(email, '@')
-	if at <= 0 {
-		return ""
-	}
-	return strings.ToLower(strings.TrimSpace(email[:at]))
-}
-
-// sanitizeUsername coerces a free-form string to the charset the
-// app tends to accept for usernames: lowercase alnum + dot + hyphen
-// + underscore. Anything else is dropped. Returns "" if the result
-// is shorter than 3 chars.
-func sanitizeUsername(raw string) string {
-	lower := strings.ToLower(strings.TrimSpace(raw))
-	b := make([]byte, 0, len(lower))
-	for i := 0; i < len(lower); i++ {
-		ch := lower[i]
-		switch {
-		case ch >= 'a' && ch <= 'z',
-			ch >= '0' && ch <= '9',
-			ch == '.', ch == '-', ch == '_':
-			b = append(b, ch)
-		}
-	}
-	out := string(b)
-	if len(out) < 3 {
-		return ""
-	}
-	if len(out) > 100 {
-		out = out[:100]
-	}
-	return out
-}
-
-// shortHex returns n bytes of hex from crypto/rand. Used only for
-// suffixes on collision, so the small allocation is fine.
-func shortHex(n int) string {
-	buf := make([]byte, n)
-	if _, err := cryptoRand(buf); err != nil {
-		// crypto/rand failures are essentially impossible on a healthy
-		// host; fall back to a timestamp-derived value so we still
-		// produce *something* rather than panic during sign-up.
-		return hex.EncodeToString([]byte(time.Now().Format("0405")))[:n*2]
-	}
-	return hex.EncodeToString(buf)
-}
-
-// cryptoRand is wrapped behind a var so a test can swap it out.
-var cryptoRand = func(b []byte) (int, error) {
-	return cryptorand.Read(b)
-}
-
-// marshalProfile serializes a verified token's claims for storage in
-// user_identities.raw_profile. Falls back to "{}" on marshalling error
-// so a non-fatal serialization issue doesn't kill the sign-in.
-func marshalProfile(tok *pkgfirebase.VerifiedToken) []byte {
-	b, err := json.Marshal(tok.Claims)
+// userInfo describes user to themselves, with the Google account linked
+// to it.
+func (s *AuthService) userInfo(ctx context.Context, user *userDomain.User) (dto.UserInfo, error) {
+	google, err := s.userIdentityRepo.FindByUser(ctx, user.ID, userDomain.IdentityProviderGoogle)
 	if err != nil {
-		return []byte("{}")
+		return dto.UserInfo{}, err
 	}
-	return b
+	return toUserInfo(user, google), nil
 }
 
-// hashToken creates a SHA-256 hash of the token
-func hashToken(tokenStr string) string {
-	h := sha256.New()
-	h.Write([]byte(tokenStr))
-	return hex.EncodeToString(h.Sum(nil))
+// toUserInfo describes user, whose linked Google identity is google (nil:
+// none).
+func toUserInfo(user *userDomain.User, google *userDomain.UserIdentity) dto.UserInfo {
+	info := dto.UserInfo{
+		ID:              user.ID,
+		Email:           user.Email,
+		Username:        user.Username,
+		FullName:        user.FullName,
+		AvatarURL:       user.AvatarURL,
+		Timezone:        user.Timezone,
+		HasPassword:     user.PasswordHash != "",
+		IsEmailVerified: user.IsEmailVerified,
+	}
+	if google != nil {
+		info.Google = &dto.LinkedGoogle{Email: google.Email, LinkedAt: google.CreatedAt}
+	}
+	return info
 }
 
+// accessTokenExpiresIn is the expires_in sent with every token pair; it
+// follows JWT_EXPIRATION, the same setting the token is signed with.
+func accessTokenExpiresIn() int {
+	return int(jwt.GetExpirationTime().Seconds())
+}
 
-// GetDeviceInfoFromUserAgent extracts device info from user agent string
+// GetDeviceInfoFromUserAgent extracts device info from a user agent
+// string. Checks run from most to least specific: the desktop app's
+// Electron UA also says "Chrome", every Edge UA also says "Chrome", every
+// Chrome UA says "Safari", iOS UAs say "Mac OS X" and Android UAs say
+// "Linux".
 func GetDeviceInfoFromUserAgent(userAgent string) domain.DeviceInfo {
 	info := domain.DeviceInfo{}
 
 	ua := strings.ToLower(userAgent)
 
-	// Detect browser
 	switch {
-	case strings.Contains(ua, "chrome"):
-		info.Browser = "Chrome"
-	case strings.Contains(ua, "firefox"):
-		info.Browser = "Firefox"
-	case strings.Contains(ua, "safari"):
-		info.Browser = "Safari"
-	case strings.Contains(ua, "edge"):
+	case strings.Contains(ua, "timebox/"), strings.Contains(ua, "electron/"):
+		info.Browser = desktopAppName
+	case strings.Contains(ua, "edg/"), strings.Contains(ua, "edge/"):
 		info.Browser = "Edge"
+	case strings.Contains(ua, "opr/"), strings.Contains(ua, "opera"):
+		info.Browser = "Opera"
+	case strings.Contains(ua, "firefox/"), strings.Contains(ua, "fxios/"):
+		info.Browser = "Firefox"
+	case strings.Contains(ua, "chrome/"), strings.Contains(ua, "crios/"):
+		info.Browser = "Chrome"
+	case strings.Contains(ua, "safari/"):
+		info.Browser = "Safari"
 	default:
 		info.Browser = "Unknown"
 	}
 
-	// Detect OS
 	switch {
+	case strings.Contains(ua, "iphone"), strings.Contains(ua, "ipad"):
+		info.OS = "iOS"
+	case strings.Contains(ua, "android"):
+		info.OS = "Android"
 	case strings.Contains(ua, "windows"):
 		info.OS = "Windows"
-	case strings.Contains(ua, "mac"):
+	case strings.Contains(ua, "mac os x"), strings.Contains(ua, "macintosh"):
 		info.OS = "macOS"
 	case strings.Contains(ua, "linux"):
 		info.OS = "Linux"
-	case strings.Contains(ua, "android"):
-		info.OS = "Android"
-	case strings.Contains(ua, "iphone"), strings.Contains(ua, "ipad"):
-		info.OS = "iOS"
 	default:
 		info.OS = "Unknown"
 	}
 
-	// Detect type
 	switch {
-	case strings.Contains(ua, "mobile"), strings.Contains(ua, "android"), strings.Contains(ua, "iphone"):
-		info.Type = "mobile"
-	case strings.Contains(ua, "tablet"), strings.Contains(ua, "ipad"):
+	case strings.Contains(ua, "ipad"), strings.Contains(ua, "tablet"):
 		info.Type = "tablet"
+	case strings.Contains(ua, "mobile"), strings.Contains(ua, "iphone"), strings.Contains(ua, "android"):
+		info.Type = "mobile"
 	default:
 		info.Type = "desktop"
 	}

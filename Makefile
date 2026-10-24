@@ -1,4 +1,4 @@
-.PHONY: help migrate-up migrate-down migrate-create migrate-force migrate-version seed seed-core db-setup db-reset dev build run
+.PHONY: help migrate-up migrate-down migrate-create migrate-force migrate-version seed seed-admin db-setup db-reset dev build run test test-integration lint fmt
 
 help:
 	@echo "Available commands:"
@@ -7,42 +7,62 @@ help:
 	@echo "  make dev                     - Run with hot reload (Air)"
 	@echo "  make build                   - Build application binary"
 	@echo "  make run                     - Run application"
+	@echo "  make test                    - Run all tests with the race detector"
+	@echo "  make test-integration        - Run the database tests (needs TEST_DATABASE_URL; TEST_MONGO_URI optional)"
+	@echo "  make lint                    - gofmt check, go vet and staticcheck"
+	@echo "  make fmt                     - Format all Go files"
 	@echo ""
 	@echo "Database migrations:"
 	@echo "  make migrate-up              - Run all pending migrations"
-	@echo "  make migrate-down            - Rollback last migration"
-	@echo "  make migrate-create NAME=xxx - Create new migration file"
-	@echo "  make migrate-force V=xxx     - Force migration to specific version"
+	@echo "  make migrate-down MODULE=core - Rollback last migration of a module"
+	@echo "  make migrate-create NAME=xxx MODULE=core - Create new migration file"
+	@echo "  make migrate-force V=xxx MODULE=core     - Force migration to specific version"
 	@echo "  make migrate-version         - Show current migration version"
 	@echo ""
 	@echo "Seeding commands:"
-	@echo "  make seed                    - Run all seeders"
-	@echo "  make seed-core               - Run core module seeders only"
+	@echo "  make seed                    - Create the initial super admin (same as seed-admin)"
+	@echo "  make seed-admin              - Create the initial super admin from SEED_ADMIN_* env vars"
 	@echo ""
 	@echo "Setup commands:"
-	@echo "  make db-setup                - Run migrations + seeders (fresh setup)"
-	@echo "  make db-reset                - Drop, migrate, and seed database"
+	@echo "  make db-setup                - Run migrations + create the super admin (fresh setup)"
+	@echo "  make db-reset                - Drop, migrate, and seed database (refused when ENV=production)"
 
 # Database migrations
-DB_URL=postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=$(DB_SSLMODE)
+# The password stays out of the URL — an @ : / # ? in it would break the URL.
+# migrate and psql read it from PGPASSWORD, set from the exported DB_PASSWORD
+# with shell quoting ("$$DB_PASSWORD") so any character survives.
+DB_URL=postgresql://$(DB_USER)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=$(DB_SSLMODE)
 MIGRATIONS_PATH=internal/database/migrations
-SEEDERS_PATH=internal/database/seeders
 
-# Default values from .env
-include .env
+# staticcheck is run through `go run` at a pinned version, so it is always
+# built with this module's Go version.
+STATICCHECK=honnef.co/go/tools/cmd/staticcheck@v0.8.2
+
+# Values from .env, when present (a fresh clone or CI has none)
+-include .env
 export
+
+# Unset or empty, the database settings fall back to the defaults of
+# internal/config, so migrate-* and db-reset reach the database the API
+# would. An empty sslmode would mean require to migrate's driver (lib/pq).
+DB_HOST := $(or $(DB_HOST),localhost)
+DB_PORT := $(or $(DB_PORT),5432)
+DB_USER := $(or $(DB_USER),postgres)
+DB_PASSWORD := $(or $(DB_PASSWORD),postgres)
+DB_NAME := $(or $(DB_NAME),timebox)
+DB_SSLMODE := $(or $(DB_SSLMODE),disable)
 
 migrate-up:
 	@echo "Running migrations..."
 	@if [ -d "$(MIGRATIONS_PATH)/core" ]; then \
 		echo "Running core migrations..."; \
-		migrate -path $(MIGRATIONS_PATH)/core -database "$(DB_URL)&x-migrations-table=schema_migrations_core" up; \
+		PGPASSWORD="$$DB_PASSWORD" migrate -path $(MIGRATIONS_PATH)/core -database "$(DB_URL)&x-migrations-table=schema_migrations_core" up; \
 	fi
 
 migrate-down:
 	@if [ -z "$(MODULE)" ]; then echo "Error: MODULE is required. Usage: make migrate-down MODULE=core"; exit 1; fi
 	@echo "Rolling back last migration for module $(MODULE)..."
-	migrate -path $(MIGRATIONS_PATH)/$(MODULE) -database "$(DB_URL)&x-migrations-table=schema_migrations_$(MODULE)" down 1
+	PGPASSWORD="$$DB_PASSWORD" migrate -path $(MIGRATIONS_PATH)/$(MODULE) -database "$(DB_URL)&x-migrations-table=schema_migrations_$(MODULE)" down 1
 
 migrate-create:
 	@if [ -z "$(NAME)" ]; then echo "Error: NAME is required. Usage: make migrate-create NAME=your_migration_name MODULE=core"; exit 1; fi
@@ -53,53 +73,65 @@ migrate-create:
 migrate-force:
 	@if [ -z "$(V)" ]; then echo "Error: V is required. Usage: make migrate-force V=1 MODULE=core"; exit 1; fi
 	@if [ -z "$(MODULE)" ]; then echo "Error: MODULE is required. Available: core"; exit 1; fi
-	migrate -path $(MIGRATIONS_PATH)/$(MODULE) -database "$(DB_URL)&x-migrations-table=schema_migrations_$(MODULE)" force $(V)
+	PGPASSWORD="$$DB_PASSWORD" migrate -path $(MIGRATIONS_PATH)/$(MODULE) -database "$(DB_URL)&x-migrations-table=schema_migrations_$(MODULE)" force $(V)
 
 migrate-version:
 	@echo "Core module version:"
-	@migrate -path $(MIGRATIONS_PATH)/core -database "$(DB_URL)&x-migrations-table=schema_migrations_core" version
+	@PGPASSWORD="$$DB_PASSWORD" migrate -path $(MIGRATIONS_PATH)/core -database "$(DB_URL)&x-migrations-table=schema_migrations_core" version
 
-# Database seeders
-seed-core:
-	@echo "Running core seeders..."
-	@if [ -d "$(SEEDERS_PATH)/core" ]; then \
-		for file in $(SEEDERS_PATH)/core/*.sql; do \
-			if [ -f "$$file" ]; then \
-				echo "Running seeder: $$(basename $$file)"; \
-				PGPASSWORD=$(DB_PASSWORD) psql -v ON_ERROR_STOP=1 -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER) -d $(DB_NAME) -f $$file || exit 1; \
-			fi; \
-		done; \
-	fi
-	@echo "✅ Core seeders completed!"
+# Initial super admin — credentials come from SEED_ADMIN_* in .env, never from
+# a committed file. System roles are created by the migrations.
+seed-admin:
+	@echo "Creating initial super admin..."
+	@go run ./cmd/seed-admin
 
-seed: seed-core
-	@echo "✅ All seeders completed!"
+seed: seed-admin
 
 # Database setup commands
 db-setup:
 	@echo "🚀 Setting up database..."
-	@make migrate-up
+	@$(MAKE) migrate-up
 	@echo ""
-	@make seed
+	@$(MAKE) seed
 	@echo "✅ Database setup completed!"
 
 db-reset:
-	@echo "⚠️  Resetting database (this will drop all data)..."
-	@PGPASSWORD=$(DB_PASSWORD) psql -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER) -d postgres -c "DROP DATABASE IF EXISTS $(DB_NAME) WITH (FORCE);"
-	@PGPASSWORD=$(DB_PASSWORD) psql -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER) -d postgres -c "CREATE DATABASE $(DB_NAME);"
+	@if [ "$(ENV)" = "production" ]; then echo "Error: db-reset is refused when ENV=production"; exit 1; fi
+	@echo "⚠️  Resetting database $(DB_NAME) on $(DB_HOST) (this will drop all data)..."
+	@PGPASSWORD="$$DB_PASSWORD" psql -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER) -d postgres -c "DROP DATABASE IF EXISTS $(DB_NAME) WITH (FORCE);"
+	@PGPASSWORD="$$DB_PASSWORD" psql -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER) -d postgres -c "CREATE DATABASE $(DB_NAME);"
 	@echo "Database dropped and recreated!"
-	@make db-setup
+	@$(MAKE) db-setup
 
 # Development commands
 build:
 	@echo "🔨 Building application..."
-	@go build -o bin/tuai-api cmd/api/main.go
-	@echo "✅ Build completed: bin/tuai-api"
+	@go build -o bin/timebox-api ./cmd/api
+	@echo "✅ Build completed: bin/timebox-api"
 
 run:
 	@echo "🚀 Running application..."
-	@go run cmd/api/main.go
+	@go run ./cmd/api
 
 dev:
 	@echo "🔥 Starting development server with hot reload..."
 	@~/go/bin/air
+
+test:
+	@go test -race ./...
+
+# Integration tests run against a real, migrated database — never one whose
+# data matters: they create and delete users. TEST_MONGO_URI (optional)
+# adds the audit log tests, which use and drop a database of their own.
+test-integration:
+	@if [ -z "$(TEST_DATABASE_URL)" ]; then echo "Error: set TEST_DATABASE_URL to a migrated test database, e.g. postgres://postgres:secret@localhost:5432/timebox_test?sslmode=disable"; exit 1; fi
+	@go test -race -count=1 -run Integration ./...
+
+fmt:
+	@gofmt -w .
+
+lint:
+	@unformatted=$$(gofmt -l .); if [ -n "$$unformatted" ]; then echo "Not gofmt-ed:"; echo "$$unformatted"; exit 1; fi
+	@go vet ./...
+	@go run $(STATICCHECK) ./...
+	@echo "✅ Lint passed"

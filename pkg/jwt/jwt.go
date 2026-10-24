@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -19,65 +20,82 @@ var (
 
 const (
 	MinSecretLength = 32 // Minimum length for JWT secret in characters
+
+	// Issuer is set on every token this API signs, and required on every
+	// token it accepts.
+	Issuer = "timebox-api"
+
+	// DefaultExpiration applies when JWT_EXPIRATION is unset or invalid.
+	// Access tokens are kept short: ending sessions refuses them at once
+	// (see authz.Subject), but only by a lookup on every request.
+	DefaultExpiration = 15 * time.Minute
+
+	// clockSkewLeeway absorbs clock differences between the replicas: a
+	// token is used at once, possibly on another one than signed it, whose
+	// clock may be a few milliseconds behind its not-before time.
+	clockSkewLeeway = 5 * time.Second
 )
 
-// ValidateSecret validates that JWT_SECRET is set and meets minimum requirements
-// This should be called at application startup
-func ValidateSecret(env string) error {
-	secret := os.Getenv("JWT_SECRET")
-
-	// In production, JWT_SECRET must be set
-	if env == "production" {
-		if secret == "" {
-			return fmt.Errorf("%w: JWT_SECRET environment variable must be set in production", ErrInvalidJWTSecret)
-		}
-
-		if len(secret) < MinSecretLength {
-			return fmt.Errorf("%w: JWT_SECRET must be at least %d characters long (current: %d)",
-				ErrInvalidJWTSecret, MinSecretLength, len(secret))
-		}
-
-		// Check if using the default development secret
-		if secret == "tuai-development-secret-change-in-production" {
-			return fmt.Errorf("%w: cannot use default development secret in production", ErrInvalidJWTSecret)
-		}
-	} else {
-		// In development/staging, warn if secret is weak but don't fail
-		if secret != "" && len(secret) < MinSecretLength {
-			fmt.Printf("WARNING: JWT_SECRET is shorter than recommended minimum of %d characters\n", MinSecretLength)
-		}
-	}
-
-	return nil
+func init() {
+	// Issue times carry milliseconds ("iat": 1761187200.123, still a valid
+	// NumericDate). Signing out everywhere rejects every token issued
+	// before that instant; at whole-second precision a token issued
+	// earlier in the same second would survive it.
+	jwt.TimePrecision = time.Millisecond
 }
 
-// GetSecret returns JWT secret from environment variable
-func GetSecret() []byte {
+// publishedSecrets are values that have appeared in this repository as a
+// default or placeholder. Anyone who can read the repo can sign tokens
+// with them, so they are rejected even though they pass the length check.
+var publishedSecrets = map[string]struct{}{
+	"tuai-development-secret-change-in-production":                 {},
+	"your-super-secret-key-change-in-production-min-32-characters": {},
+}
+
+// ValidateSecret checks JWT_SECRET at application startup.
+//
+// The check applies in every environment. A token signed with a missing,
+// short, or published secret can be forged, whatever ENV says.
+func ValidateSecret() error {
+	_, err := GetSecret()
+	return err
+}
+
+// GetSecret returns the JWT signing key from JWT_SECRET. There is no
+// fallback: signing or verifying with an invalid secret is an error.
+func GetSecret() ([]byte, error) {
 	secret := os.Getenv("JWT_SECRET")
+
 	if secret == "" {
-		// Default secret for development only
-		// In production, JWT_SECRET MUST be set in .env
-		secret = "tuai-development-secret-change-in-production"
+		return nil, fmt.Errorf("%w: JWT_SECRET environment variable must be set", ErrInvalidJWTSecret)
 	}
-	return []byte(secret)
+
+	if len(secret) < MinSecretLength {
+		return nil, fmt.Errorf("%w: JWT_SECRET must be at least %d characters long (current: %d)",
+			ErrInvalidJWTSecret, MinSecretLength, len(secret))
+	}
+
+	if _, ok := publishedSecrets[secret]; ok {
+		return nil, fmt.Errorf("%w: JWT_SECRET is a placeholder published in this repository; generate one with `openssl rand -base64 48`",
+			ErrInvalidJWTSecret)
+	}
+
+	return []byte(secret), nil
 }
 
-// GetExpirationTime returns token expiration duration from environment
+// GetExpirationTime returns the access token lifetime from JWT_EXPIRATION.
+// The value is trimmed: `make` keeps the spaces before an inline .env
+// comment as part of it.
 func GetExpirationTime() time.Duration {
-	expStr := os.Getenv("JWT_EXPIRATION")
-	if expStr == "" {
-		return 24 * time.Hour // Default 24 hours
+	duration, err := time.ParseDuration(strings.TrimSpace(os.Getenv("JWT_EXPIRATION")))
+	if err != nil || duration <= 0 {
+		return DefaultExpiration
 	}
-
-	duration, err := time.ParseDuration(expStr)
-	if err != nil {
-		return 24 * time.Hour // Fallback to 24 hours
-	}
-
 	return duration
 }
 
-// GenerateToken generates a new JWT token with user claims.
+// GenerateToken generates a new JWT token with user claims, belonging to
+// the sign-in session sessionID.
 //
 // Note: the user's permission set is NOT embedded in the token. Keeping
 // it out lets the token stay small enough to survive every proxy in the
@@ -87,9 +105,9 @@ func GenerateToken(
 	userID, email, username, fullName string,
 	isSuperAdmin bool,
 	roles []string,
+	sessionID string,
 ) (string, error) {
 	now := time.Now()
-	expirationTime := GetExpirationTime()
 
 	claims := &Claims{
 		UserID:       userID,
@@ -98,17 +116,23 @@ func GenerateToken(
 		FullName:     fullName,
 		IsSuperAdmin: isSuperAdmin,
 		Roles:        roles,
+		SessionID:    sessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(expirationTime)),
+			ExpiresAt: jwt.NewNumericDate(now.Add(GetExpirationTime())),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
-			Issuer:    "tuai-api",
+			Issuer:    Issuer,
 			Subject:   userID,
 		},
 	}
 
+	secret, err := GetSecret()
+	if err != nil {
+		return "", err
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(GetSecret())
+	tokenString, err := token.SignedString(secret)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign token: %w", err)
 	}
@@ -116,19 +140,23 @@ func GenerateToken(
 	return tokenString, nil
 }
 
-// ParseToken parses and validates a JWT token string
+// ParseToken parses and validates a JWT token string. It accepts only
+// HS256 tokens issued by this API that carry an expiry and an issue time.
 func ParseToken(tokenString string) (*Claims, error) {
 	if tokenString == "" {
 		return nil, ErrTokenNotProvided
 	}
 
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		// Validate signing method
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return GetSecret(), nil
-	})
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{},
+		func(*jwt.Token) (any, error) {
+			return GetSecret()
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(Issuer),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(clockSkewLeeway),
+	)
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
@@ -141,38 +169,9 @@ func ParseToken(tokenString string) (*Claims, error) {
 	}
 
 	claims, ok := token.Claims.(*Claims)
-	if !ok || !token.Valid {
+	if !ok || !token.Valid || claims.IssuedAt == nil {
 		return nil, ErrInvalidToken
 	}
 
 	return claims, nil
-}
-
-// ValidateToken validates a token and returns claims if valid
-func ValidateToken(tokenString string) (*Claims, error) {
-	return ParseToken(tokenString)
-}
-
-// RefreshToken generates a new token from an existing valid token
-// This can be used to extend user session
-func RefreshToken(oldTokenString string) (string, error) {
-	claims, err := ParseToken(oldTokenString)
-	if err != nil {
-		// Allow refresh even if token is expired (but not if invalid signature)
-		if !errors.Is(err, ErrExpiredToken) {
-			return "", err
-		}
-	}
-
-	// Generate new token with same claims. Permissions are not part of
-	// the token anymore — the caller refetches them from authz on the
-	// next request, so there's nothing to carry across here.
-	return GenerateToken(
-		claims.UserID,
-		claims.Email,
-		claims.Username,
-		claims.FullName,
-		claims.IsSuperAdmin,
-		claims.Roles,
-	)
 }

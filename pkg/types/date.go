@@ -14,10 +14,16 @@ type Date struct {
 
 const DateFormat = "2006-01-02"
 
-// UnmarshalJSON implements json.Unmarshaler to parse date strings in YYYY-MM-DD format
+// UnmarshalJSON implements json.Unmarshaler to parse date strings in YYYY-MM-DD format.
+// null and "" give the zero Date, matching what MarshalJSON writes for it.
 func (d *Date) UnmarshalJSON(b []byte) error {
-	// Remove quotes from JSON string
 	s := string(b)
+	if s == "null" {
+		d.Time = time.Time{}
+		return nil
+	}
+
+	// Remove quotes from JSON string
 	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
 		return fmt.Errorf("invalid date format: expected quoted string")
 	}

@@ -3,112 +3,99 @@ package database
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"venturo-skeleton-go-simple/pkg/logger"
+
+	"timebox-be/internal/config"
+	"timebox-be/pkg/logger"
+)
+
+// Session settings of every connection, sent at connect time.
+const (
+	// applicationName names the connections in pg_stat_activity.
+	applicationName = "timebox-api"
+	// statementTimeout ends any statement that runs longer. Requests run
+	// in well under a second, the hourly token cleanup in a few, and
+	// migrations go through the migrate CLI, not this pool.
+	statementTimeout = 30 * time.Second
+	// idleInTransactionTimeout ends a session left idle inside an open
+	// transaction (a stuck request), releasing the locks it holds.
+	idleInTransactionTimeout = 60 * time.Second
 )
 
 type Database struct {
 	Pool *pgxpool.Pool
 }
 
-// ParseConfig creates a pgxpool.Config from DSN and environment variables
-func ParseConfig(dsn string) (*pgxpool.Config, error) {
-	config, err := pgxpool.ParseConfig(dsn)
+// ParseConfig turns the database settings into a pgxpool.Config. Zero
+// pool settings keep pgx's own defaults.
+func ParseConfig(cfg config.DatabaseConfig) (*pgxpool.Config, error) {
+	poolConfig, err := pgxpool.ParseConfig(cfg.GetDSN())
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse DSN: %w", err)
 	}
 
-	// Configure MaxConns - Maximum number of connections in the pool
-	if maxConns := getEnvAsInt("DB_MAX_CONNS", 25); maxConns > 0 {
-		config.MaxConns = int32(maxConns)
+	params := poolConfig.ConnConfig.RuntimeParams
+	params["application_name"] = applicationName
+	params["statement_timeout"] = milliseconds(statementTimeout)
+	params["idle_in_transaction_session_timeout"] = milliseconds(idleInTransactionTimeout)
+
+	if cfg.MaxConns > 0 {
+		poolConfig.MaxConns = int32(cfg.MaxConns)
+	}
+	if cfg.MinConns > 0 {
+		poolConfig.MinConns = int32(cfg.MinConns)
+	}
+	if cfg.MaxConnLifetime > 0 {
+		poolConfig.MaxConnLifetime = cfg.MaxConnLifetime
+	}
+	if cfg.MaxConnIdleTime > 0 {
+		poolConfig.MaxConnIdleTime = cfg.MaxConnIdleTime
+	}
+	if cfg.HealthCheckPeriod > 0 {
+		poolConfig.HealthCheckPeriod = cfg.HealthCheckPeriod
+	}
+	if cfg.ConnectTimeout > 0 {
+		poolConfig.ConnConfig.ConnectTimeout = cfg.ConnectTimeout
 	}
 
-	// Configure MinConns - Minimum number of idle connections
-	if minConns := getEnvAsInt("DB_MIN_CONNS", 5); minConns > 0 {
-		config.MinConns = int32(minConns)
-	}
-
-	// Configure MaxConnLifetime - Maximum lifetime of a connection
-	if lifetime := getEnvAsDuration("DB_MAX_CONN_LIFETIME", "1h"); lifetime > 0 {
-		config.MaxConnLifetime = lifetime
-	}
-
-	// Configure MaxConnIdleTime - Maximum idle time before closing
-	if idleTime := getEnvAsDuration("DB_MAX_CONN_IDLE_TIME", "30m"); idleTime > 0 {
-		config.MaxConnIdleTime = idleTime
-	}
-
-	// Configure HealthCheckPeriod - Interval for connection health checks
-	if healthCheck := getEnvAsDuration("DB_HEALTH_CHECK_PERIOD", "1m"); healthCheck > 0 {
-		config.HealthCheckPeriod = healthCheck
-	}
-
-	// Configure ConnConfig - Connection-level settings
-	if connectTimeout := getEnvAsDuration("DB_CONNECT_TIMEOUT", "5s"); connectTimeout > 0 {
-		config.ConnConfig.ConnectTimeout = connectTimeout
-	}
-
-	return config, nil
+	return poolConfig, nil
 }
 
-func New(dsn string) (*Database, error) {
-	// Parse config with custom pool settings
-	config, err := ParseConfig(dsn)
+// New opens the connection pool and verifies it with a ping.
+func New(ctx context.Context, cfg config.DatabaseConfig) (*Database, error) {
+	poolConfig, err := ParseConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create connection pool with config
-	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection pool: %w", err)
 	}
 
-	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if err := pool.Ping(ctx); err != nil {
+	if err := pool.Ping(pingCtx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// Log pool stats
 	logPoolStats(pool)
 
 	return &Database{Pool: pool}, nil
 }
 
+// milliseconds writes d the way PostgreSQL reads a timeout without a unit
+func milliseconds(d time.Duration) string {
+	return strconv.FormatInt(d.Milliseconds(), 10)
+}
+
 func (d *Database) Close() {
 	d.Pool.Close()
-}
-
-// Helper functions
-
-func getEnvAsInt(key string, defaultVal int) int {
-	if val := os.Getenv(key); val != "" {
-		if intVal, err := strconv.Atoi(val); err == nil {
-			return intVal
-		}
-	}
-	return defaultVal
-}
-
-func getEnvAsDuration(key string, defaultVal string) time.Duration {
-	val := os.Getenv(key)
-	if val == "" {
-		val = defaultVal
-	}
-	duration, err := time.ParseDuration(val)
-	if err != nil {
-		// Fallback to default if parsing fails
-		duration, _ = time.ParseDuration(defaultVal)
-	}
-	return duration
 }
 
 func logPoolStats(pool *pgxpool.Pool) {

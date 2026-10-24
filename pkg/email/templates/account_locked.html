@@ -68,7 +68,7 @@
 
             <div class="alert-box">
                 <strong>⚠️ Your account has been temporarily locked</strong>
-                <p style="margin: 10px 0 0 0;">We detected multiple failed login attempts on your account.</p>
+                <p style="margin: 10px 0 0 0;">We detected several incorrect password attempts on your account.</p>
             </div>
 
             <p>To protect your account security, we've temporarily locked your account.</p>
@@ -76,20 +76,20 @@
             <div class="info-box">
                 <strong>What happens next?</strong>
                 <ul style="margin: 5px 0;">
-                    <li>Your account will be automatically unlocked in 30 minutes</li>
+                    <li>Your account will be automatically unlocked in {{.Duration}}</li>
                     <li>You can reset your password if you've forgotten it</li>
                     <li>Contact support if you need immediate assistance</li>
                 </ul>
             </div>
 
-            <p><strong>Didn't try to log in?</strong></p>
-            <p>If you didn't attempt to access your account, please reset your password immediately and contact our support team.</p>
+            <p><strong>Wasn't this you?</strong></p>
+            <p>Someone may be guessing your password. Reset it now — a reset also signs you out on every device — and contact our support team.</p>
 
             <p>Best regards,<br>The {{.AppName}} Security Team</p>
         </div>
         <div class="footer">
             <p>© {{.Year}} {{.AppName}}. All rights reserved.</p>
-            <p>Need help? Contact us at <a href="mailto:{{.SupportEmail}}" class="link">{{.SupportEmail}}</a></p>
+            {{if .SupportEmail}}<p>Need help? Contact us at <a href="mailto:{{.SupportEmail}}" class="link">{{.SupportEmail}}</a></p>{{end}}
         </div>
     </div>
 </body>

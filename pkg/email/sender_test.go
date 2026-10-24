@@ -1,405 +1,332 @@
 package email
 
 import (
-	"os"
+	"bytes"
+	"errors"
+	"fmt"
+	"html"
+	"io"
+	"mime"
+	"mime/quotedprintable"
+	"net/mail"
+	"strings"
 	"testing"
+	"time"
 )
 
-// TestSMTPEmailService_SendVerificationEmail tests verification email sending
-func TestSMTPEmailService_SendVerificationEmail(t *testing.T) {
-	// Setup service
-	os.Setenv("SMTP_USER", "testuser")
-	os.Setenv("SMTP_PASSWORD", "testpass")
-	os.Setenv("EMAIL_VERIFICATION_URL", "https://test.com/verify")
-	defer func() {
-		os.Unsetenv("SMTP_USER")
-		os.Unsetenv("SMTP_PASSWORD")
-		os.Unsetenv("EMAIL_VERIFICATION_URL")
-	}()
+// envelope is one captured delivery: the SMTP envelope and the message
+type envelope struct {
+	from, to string
+	msg      io.WriterTo
+}
 
-	service, err := NewSMTPEmailService()
+// sentEmail is a delivered message decoded back into plain values
+type sentEmail struct {
+	From    *mail.Address
+	To      string
+	Subject string
+	Body    string // HTML with entities unescaped, so links read as plain URLs
+}
+
+// newTestService returns a service whose messages are captured instead of
+// sent over SMTP
+func newTestService(t *testing.T, cfg Config) (*SMTPEmailService, *[]envelope) {
+	t.Helper()
+	service, err := NewSMTPEmailService(cfg)
 	if err != nil {
-		t.Fatalf("Failed to create service: %v", err)
+		t.Fatalf("NewSMTPEmailService() error = %v", err)
+	}
+	sent := &[]envelope{}
+	service.send = func(from, to string, msg io.WriterTo) error {
+		*sent = append(*sent, envelope{from: from, to: to, msg: msg})
+		return nil
+	}
+	return service, sent
+}
+
+func decode(t *testing.T, e envelope) sentEmail {
+	t.Helper()
+	var raw bytes.Buffer
+	if _, err := e.msg.WriteTo(&raw); err != nil {
+		t.Fatalf("message.WriteTo() error = %v", err)
+	}
+	msg, err := mail.ReadMessage(&raw)
+	if err != nil {
+		t.Fatalf("mail.ReadMessage() error = %v", err)
 	}
 
+	from, err := mail.ParseAddress(msg.Header.Get("From"))
+	if err != nil {
+		t.Fatalf("From header %q: %v", msg.Header.Get("From"), err)
+	}
+	subject, err := new(mime.WordDecoder).DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		t.Fatalf("Subject header: %v", err)
+	}
+	if got := msg.Header.Get("Content-Transfer-Encoding"); got != "quoted-printable" {
+		t.Fatalf("Content-Transfer-Encoding = %q, want quoted-printable", got)
+	}
+	body, err := io.ReadAll(quotedprintable.NewReader(msg.Body))
+	if err != nil {
+		t.Fatalf("decoding body: %v", err)
+	}
+
+	return sentEmail{
+		From:    from,
+		To:      msg.Header.Get("To"),
+		Subject: subject,
+		Body:    html.UnescapeString(string(body)),
+	}
+}
+
+func TestSMTPEmailService_Send(t *testing.T) {
+	cfg := validConfig()
+	cfg.NotificationsFromEmail = "notifications@example.com"
+	service, sent := newTestService(t, cfg)
+	const to, name = "ada@example.com", "Ada Lovelace"
+	// Codes come from FromEmail, every other email from NotificationsFromEmail
+	const codes, notices = "noreply@example.com", "notifications@example.com"
+
 	tests := []struct {
-		name    string
-		to      string
-		toName  string
-		token   string
-		wantErr bool
+		name        string
+		send        func() error
+		wantFrom    string
+		wantSubject string
+		wantBody    []string
 	}{
 		{
-			name:    "valid verification email",
-			to:      "test@example.com",
-			toName:  "Test User",
-			token:   "abc123token",
-			wantErr: true, // Will fail because we don't have real SMTP credentials
+			name:        "verification code",
+			send:        func() error { return service.SendVerificationCode(to, name, "482916", 15*time.Minute) },
+			wantFrom:    codes,
+			wantSubject: "482916 is your Timebox verification code",
+			wantBody:    []string{`<div class="code">482916</div>`, "Thank you for signing up for Timebox!", "This code expires in 15 minutes."},
 		},
 		{
-			name:    "empty email",
-			to:      "",
-			toName:  "Test User",
-			token:   "abc123",
-			wantErr: true,
+			name:        "password reset code",
+			send:        func() error { return service.SendPasswordResetCode(to, name, "731045", time.Hour) },
+			wantFrom:    codes,
+			wantSubject: "731045 is your Timebox password reset code",
+			wantBody:    []string{`<div class="code">731045</div>`, "This code expires in 1 hour."},
 		},
 		{
-			name:    "empty name",
-			to:      "test@example.com",
-			toName:  "",
-			token:   "abc123",
-			wantErr: true, // Will fail at SMTP level
+			name:        "password changed",
+			send:        func() error { return service.SendPasswordChangedEmail(to, name) },
+			wantFrom:    notices,
+			wantSubject: "Password Changed Successfully - Timebox",
+			wantBody:    []string{"your Timebox account password was recently changed"},
 		},
 		{
-			name:    "empty token",
-			to:      "test@example.com",
-			toName:  "Test User",
-			token:   "",
-			wantErr: true, // Will fail at SMTP level
+			name:        "account locked",
+			send:        func() error { return service.SendAccountLockedEmail(to, name, 30*time.Minute) },
+			wantFrom:    notices,
+			wantSubject: "Account Security Alert - Timebox",
+			wantBody:    []string{"Your account has been temporarily locked", "unlocked in 30 minutes", "The Timebox Security Team"},
 		},
 		{
-			name:    "invalid email format",
-			to:      "invalid-email",
-			toName:  "Test User",
-			token:   "abc123",
-			wantErr: true,
+			name:        "welcome",
+			send:        func() error { return service.SendWelcomeEmail(to, name) },
+			wantFrom:    notices,
+			wantSubject: "Welcome to Timebox!",
+			wantBody:    []string{"Welcome to Timebox!", `href="https://app.example.com"`},
 		},
 		{
-			name:    "long token",
-			to:      "test@example.com",
-			toName:  "Test User",
-			token:   "very-long-token-12345678901234567890123456789012345678901234567890",
-			wantErr: true, // Will fail at SMTP level
+			name:        "email change code",
+			send:        func() error { return service.SendEmailChangeCode(to, name, "905127", 15*time.Minute) },
+			wantFrom:    codes,
+			wantSubject: "905127 is your code to confirm your new Timebox email",
+			wantBody:    []string{`<div class="code">905127</div>`, "This code expires in 15 minutes."},
+		},
+		{
+			name:        "email changed",
+			send:        func() error { return service.SendEmailChangedEmail(to, name, "ada@new.example.com") },
+			wantFrom:    notices,
+			wantSubject: "Your Email Was Changed - Timebox",
+			wantBody:    []string{"now uses a new email address", "ada@new.example.com"},
+		},
+		{
+			name:        "account closed",
+			send:        func() error { return service.SendAccountClosedEmail(to, name) },
+			wantFrom:    notices,
+			wantSubject: "Your Account Was Closed - Timebox",
+			wantBody:    []string{"Your Timebox account has been closed"},
+		},
+		{
+			name:        "google linked",
+			send:        func() error { return service.SendGoogleLinkedEmail(to, name, "ada.lovelace@gmail.com") },
+			wantFrom:    notices,
+			wantSubject: "Google Account Linked - Timebox",
+			wantBody:    []string{"The Google account <strong>ada.lovelace@gmail.com</strong> can now sign in to your account."},
+		},
+		{
+			name:        "google unlinked",
+			send:        func() error { return service.SendGoogleUnlinkedEmail(to, name, "ada.lovelace@gmail.com") },
+			wantFrom:    notices,
+			wantSubject: "Google Account Unlinked - Timebox",
+			wantBody:    []string{"The Google account <strong>ada.lovelace@gmail.com</strong> can no longer sign in to your account."},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := service.SendVerificationEmail(tt.to, tt.toName, tt.token)
-
-			// We expect errors because we're not connected to real SMTP
-			// This test validates the method signature and basic flow
-			if (err != nil) != tt.wantErr {
-				t.Errorf("SendVerificationEmail() error = %v, wantErr %v", err, tt.wantErr)
+			*sent = nil
+			if err := tt.send(); err != nil {
+				t.Fatalf("send error = %v", err)
 			}
-		})
-	}
-}
-
-// TestSMTPEmailService_SendWelcomeEmail tests welcome email sending
-func TestSMTPEmailService_SendWelcomeEmail(t *testing.T) {
-	os.Setenv("SMTP_USER", "testuser")
-	os.Setenv("SMTP_PASSWORD", "testpass")
-	defer func() {
-		os.Unsetenv("SMTP_USER")
-		os.Unsetenv("SMTP_PASSWORD")
-	}()
-
-	service, err := NewSMTPEmailService()
-	if err != nil {
-		t.Fatalf("Failed to create service: %v", err)
-	}
-
-	tests := []struct {
-		name    string
-		to      string
-		toName  string
-		wantErr bool
-	}{
-		{
-			name:    "valid welcome email",
-			to:      "test@example.com",
-			toName:  "Test User",
-			wantErr: true, // Will fail without real SMTP
-		},
-		{
-			name:    "empty email",
-			to:      "",
-			toName:  "Test User",
-			wantErr: true,
-		},
-		{
-			name:    "empty name",
-			to:      "test@example.com",
-			toName:  "",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := service.SendWelcomeEmail(tt.to, tt.toName)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("SendWelcomeEmail() error = %v, wantErr %v", err, tt.wantErr)
+			if len(*sent) != 1 {
+				t.Fatalf("sent %d messages, want 1", len(*sent))
 			}
-		})
-	}
-}
-
-// TestSMTPEmailService_SendPasswordResetEmail tests password reset email
-func TestSMTPEmailService_SendPasswordResetEmail(t *testing.T) {
-	os.Setenv("SMTP_USER", "testuser")
-	os.Setenv("SMTP_PASSWORD", "testpass")
-	os.Setenv("RESET_PASSWORD_URL", "https://test.com/reset")
-	defer func() {
-		os.Unsetenv("SMTP_USER")
-		os.Unsetenv("SMTP_PASSWORD")
-		os.Unsetenv("RESET_PASSWORD_URL")
-	}()
-
-	service, err := NewSMTPEmailService()
-	if err != nil {
-		t.Fatalf("Failed to create service: %v", err)
-	}
-
-	tests := []struct {
-		name    string
-		to      string
-		toName  string
-		token   string
-		wantErr bool
-	}{
-		{
-			name:    "valid reset email",
-			to:      "test@example.com",
-			toName:  "Test User",
-			token:   "reset123",
-			wantErr: true,
-		},
-		{
-			name:    "empty token",
-			to:      "test@example.com",
-			toName:  "Test User",
-			token:   "",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := service.SendPasswordResetEmail(tt.to, tt.toName, tt.token)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("SendPasswordResetEmail() error = %v, wantErr %v", err, tt.wantErr)
+			if env := (*sent)[0]; env.from != tt.wantFrom || env.to != to {
+				t.Errorf("envelope = %s -> %s, want %s -> %s", env.from, env.to, tt.wantFrom, to)
 			}
-		})
-	}
-}
+			got := decode(t, (*sent)[0])
 
-// TestSMTPEmailService_SendAccountLockedEmail tests account locked email
-func TestSMTPEmailService_SendAccountLockedEmail(t *testing.T) {
-	os.Setenv("SMTP_USER", "testuser")
-	os.Setenv("SMTP_PASSWORD", "testpass")
-	defer func() {
-		os.Unsetenv("SMTP_USER")
-		os.Unsetenv("SMTP_PASSWORD")
-	}()
-
-	service, err := NewSMTPEmailService()
-	if err != nil {
-		t.Fatalf("Failed to create service: %v", err)
-	}
-
-	tests := []struct {
-		name    string
-		to      string
-		toName  string
-		wantErr bool
-	}{
-		{
-			name:    "valid locked email",
-			to:      "test@example.com",
-			toName:  "Test User",
-			wantErr: true,
-		},
-		{
-			name:    "empty email",
-			to:      "",
-			toName:  "Test User",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := service.SendAccountLockedEmail(tt.to, tt.toName)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("SendAccountLockedEmail() error = %v, wantErr %v", err, tt.wantErr)
+			if got.Subject != tt.wantSubject {
+				t.Errorf("Subject = %q, want %q", got.Subject, tt.wantSubject)
 			}
-		})
-	}
-}
-
-// TestSMTPEmailService_SendPasswordChangedEmail tests password changed email
-func TestSMTPEmailService_SendPasswordChangedEmail(t *testing.T) {
-	os.Setenv("SMTP_USER", "testuser")
-	os.Setenv("SMTP_PASSWORD", "testpass")
-	defer func() {
-		os.Unsetenv("SMTP_USER")
-		os.Unsetenv("SMTP_PASSWORD")
-	}()
-
-	service, err := NewSMTPEmailService()
-	if err != nil {
-		t.Fatalf("Failed to create service: %v", err)
-	}
-
-	tests := []struct {
-		name    string
-		to      string
-		toName  string
-		wantErr bool
-	}{
-		{
-			name:    "valid password changed email",
-			to:      "test@example.com",
-			toName:  "Test User",
-			wantErr: true,
-		},
-		{
-			name:    "empty name",
-			to:      "test@example.com",
-			toName:  "",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := service.SendPasswordChangedEmail(tt.to, tt.toName)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("SendPasswordChangedEmail() error = %v, wantErr %v", err, tt.wantErr)
+			if got.From.Name != "Timebox" || got.From.Address != tt.wantFrom {
+				t.Errorf("From = %q <%s>, want \"Timebox\" <%s>", got.From.Name, got.From.Address, tt.wantFrom)
 			}
-		})
-	}
-}
+			if got.To != to {
+				t.Errorf("To = %q, want %q", got.To, to)
+			}
 
-// TestSMTPEmailService_EmailComposition tests that emails are properly composed
-func TestSMTPEmailService_EmailComposition(t *testing.T) {
-	os.Setenv("SMTP_USER", "testuser")
-	os.Setenv("SMTP_PASSWORD", "testpass")
-	os.Setenv("SMTP_FROM_EMAIL", "noreply@test.com")
-	os.Setenv("SMTP_FROM_NAME", "Test App")
-	defer func() {
-		os.Unsetenv("SMTP_USER")
-		os.Unsetenv("SMTP_PASSWORD")
-		os.Unsetenv("SMTP_FROM_EMAIL")
-		os.Unsetenv("SMTP_FROM_NAME")
-	}()
-
-	service, err := NewSMTPEmailService()
-	if err != nil {
-		t.Fatalf("Failed to create service: %v", err)
-	}
-
-	// Verify config is set correctly
-	if service.config.FromEmail != "noreply@test.com" {
-		t.Errorf("FromEmail = %v, want noreply@test.com", service.config.FromEmail)
-	}
-
-	if service.config.FromName != "Test App" {
-		t.Errorf("FromName = %v, want Test App", service.config.FromName)
-	}
-}
-
-// TestSMTPEmailService_URLConfiguration tests URL configuration
-func TestSMTPEmailService_URLConfiguration(t *testing.T) {
-	tests := []struct {
-		name     string
-		env      map[string]string
-		checkFn  func(*SMTPEmailService) error
-	}{
-		{
-			name: "custom verification URL",
-			env: map[string]string{
-				"SMTP_USER":              "user",
-				"SMTP_PASSWORD":          "pass",
-				"EMAIL_VERIFICATION_URL": "https://custom.com/verify",
-			},
-			checkFn: func(s *SMTPEmailService) error {
-				if s.config.VerifyURL != "https://custom.com/verify" {
-					t.Errorf("VerifyURL = %v, want https://custom.com/verify", s.config.VerifyURL)
+			want := append([]string{
+				"Hi Ada Lovelace,",
+				fmt.Sprintf("© %d Timebox. All rights reserved.", time.Now().Year()),
+				`href="mailto:help@example.com"`,
+			}, tt.wantBody...)
+			for _, s := range want {
+				if !strings.Contains(got.Body, s) {
+					t.Errorf("body does not contain %q", s)
 				}
-				return nil
-			},
-		},
-		{
-			name: "custom reset URL",
-			env: map[string]string{
-				"SMTP_USER":         "user",
-				"SMTP_PASSWORD":     "pass",
-				"RESET_PASSWORD_URL": "https://custom.com/reset",
-			},
-			checkFn: func(s *SMTPEmailService) error {
-				if s.config.ResetURL != "https://custom.com/reset" {
-					t.Errorf("ResetURL = %v, want https://custom.com/reset", s.config.ResetURL)
-				}
-				return nil
-			},
-		},
-		{
-			name: "custom frontend URL",
-			env: map[string]string{
-				"SMTP_USER":     "user",
-				"SMTP_PASSWORD": "pass",
-				"FRONTEND_URL":  "https://app.custom.com",
-			},
-			checkFn: func(s *SMTPEmailService) error {
-				if s.config.FrontendURL != "https://app.custom.com" {
-					t.Errorf("FrontendURL = %v, want https://app.custom.com", s.config.FrontendURL)
-				}
-				return nil
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Set env
-			for k, v := range tt.env {
-				os.Setenv(k, v)
-			}
-			defer func() {
-				for k := range tt.env {
-					os.Unsetenv(k)
-				}
-			}()
-
-			service, err := NewSMTPEmailService()
-			if err != nil {
-				t.Fatalf("Failed to create service: %v", err)
-			}
-
-			if err := tt.checkFn(service); err != nil {
-				t.Errorf("Check function failed: %v", err)
 			}
 		})
 	}
 }
 
-// Benchmark tests
-func BenchmarkNoOpEmailService_SendVerificationEmail(b *testing.B) {
-	service := &NoOpEmailService{}
+func TestSMTPEmailService_CustomAppName(t *testing.T) {
+	cfg := validConfig()
+	cfg.AppName = "Acme Planner"
+	service, sent := newTestService(t, cfg)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = service.SendVerificationEmail("test@example.com", "Test User", "token123")
+	if err := service.SendWelcomeEmail("ada@example.com", "Ada"); err != nil {
+		t.Fatalf("SendWelcomeEmail() error = %v", err)
+	}
+	got := decode(t, (*sent)[0])
+
+	if got.Subject != "Welcome to Acme Planner!" {
+		t.Errorf("Subject = %q, want %q", got.Subject, "Welcome to Acme Planner!")
+	}
+	if got.From.Name != "Acme Planner" {
+		t.Errorf("From name = %q, want %q", got.From.Name, "Acme Planner")
+	}
+	if strings.Contains(got.Body, DefaultAppName) {
+		t.Errorf("body mentions %q although AppName is %q", DefaultAppName, cfg.AppName)
+	}
+
+	// The code subjects name the app too
+	*sent = nil
+	_ = service.SendVerificationCode("ada@example.com", "Ada", "482916", 15*time.Minute)
+	_ = service.SendPasswordResetCode("ada@example.com", "Ada", "731045", 15*time.Minute)
+	_ = service.SendEmailChangeCode("ada@example.com", "Ada", "905127", 15*time.Minute)
+	wantSubjects := []string{
+		"482916 is your Acme Planner verification code",
+		"731045 is your Acme Planner password reset code",
+		"905127 is your code to confirm your new Acme Planner email",
+	}
+	if len(*sent) != len(wantSubjects) {
+		t.Fatalf("sent %d messages, want %d", len(*sent), len(wantSubjects))
+	}
+	for i, want := range wantSubjects {
+		if got := decode(t, (*sent)[i]).Subject; got != want {
+			t.Errorf("Subject = %q, want %q", got, want)
+		}
 	}
 }
 
-func BenchmarkSMTPEmailService_ConfigCreation(b *testing.B) {
-	os.Setenv("SMTP_USER", "testuser")
-	os.Setenv("SMTP_PASSWORD", "testpass")
-	defer func() {
-		os.Unsetenv("SMTP_USER")
-		os.Unsetenv("SMTP_PASSWORD")
-	}()
+func TestSMTPEmailService_RejectsBadInput(t *testing.T) {
+	service, sent := newTestService(t, validConfig())
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _ = NewSMTPEmailService()
+	tests := []struct {
+		name string
+		send func() error
+	}{
+		{"empty recipient", func() error { return service.SendWelcomeEmail("", "Ada") }},
+		{"invalid recipient", func() error { return service.SendWelcomeEmail("invalid-email", "Ada") }},
+		{"recipient with header injection", func() error {
+			return service.SendWelcomeEmail("ada@example.com\r\nBcc: eve@example.com", "Ada")
+		}},
+		{"empty verification code", func() error { return service.SendVerificationCode("ada@example.com", "Ada", "", time.Hour) }},
+		{"empty reset code", func() error { return service.SendPasswordResetCode("ada@example.com", "Ada", "", time.Hour) }},
+		{"empty email change code", func() error { return service.SendEmailChangeCode("ada@example.com", "Ada", "", time.Hour) }},
+		{"verification without a duration", func() error {
+			return service.SendVerificationCode("ada@example.com", "Ada", "482916", 0)
+		}},
+		{"reset without a duration", func() error {
+			return service.SendPasswordResetCode("ada@example.com", "Ada", "482916", 0)
+		}},
+		{"email change without a duration", func() error {
+			return service.SendEmailChangeCode("ada@example.com", "Ada", "482916", -time.Minute)
+		}},
+		{"lock without a duration", func() error { return service.SendAccountLockedEmail("ada@example.com", "Ada", 0) }},
+		{"code to an invalid recipient", func() error {
+			return service.SendVerificationCode("invalid-email", "Ada", "482916", time.Hour)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			*sent = nil
+			if err := tt.send(); err == nil {
+				t.Error("error = nil, want an error")
+			}
+			if len(*sent) != 0 {
+				t.Errorf("sent %d messages, want none", len(*sent))
+			}
+		})
+	}
+}
+
+func TestSMTPEmailService_SendFailure(t *testing.T) {
+	service, _ := newTestService(t, validConfig())
+	dialErr := errors.New("dial tcp: connection refused")
+	service.send = func(string, string, io.WriterTo) error { return dialErr }
+
+	err := service.SendWelcomeEmail("ada@example.com", "Ada")
+	if !errors.Is(err, dialErr) {
+		t.Errorf("error = %v, want it to wrap %v", err, dialErr)
+	}
+}
+
+// A code email's subject carries the code, so neither it nor the
+// recipient reaches the logs, whether the email went out or not.
+func TestSMTPEmailService_CodeStaysOutOfLogs(t *testing.T) {
+	logs := observeLogs(t)
+	service, _ := newTestService(t, validConfig())
+	const to, code = "ada@example.com", "482916"
+
+	if err := service.SendVerificationCode(to, "Ada", code, 15*time.Minute); err != nil {
+		t.Fatalf("SendVerificationCode() error = %v", err)
+	}
+	service.send = func(string, string, io.WriterTo) error { return errors.New("dial tcp: connection refused") }
+	if err := service.SendPasswordResetCode(to, "Ada", code, 15*time.Minute); err == nil {
+		t.Fatal("SendPasswordResetCode() error = nil, want the send failure")
+	}
+
+	entries := logs.All()
+	if len(entries) != 2 {
+		t.Fatalf("logged %d entries, want 2 (one sent, one failed)", len(entries))
+	}
+	// The template still says which email it was
+	for i, want := range []string{"verification_code.html", "reset_password_code.html"} {
+		if got := entries[i].ContextMap()["template"]; got != want {
+			t.Errorf("entry %d template = %v, want %q", i, got, want)
+		}
+	}
+	for _, e := range entries {
+		line := e.Message + " " + fmt.Sprint(e.ContextMap())
+		if strings.Contains(line, code) || strings.Contains(line, to) {
+			t.Errorf("log entry leaks the code or the recipient: %s", line)
+		}
 	}
 }

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Account Was Closed</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 600px;
+            margin: 20px auto;
+            background: #fff;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .header {
+            background: #10B981;
+            color: #fff;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+        .content {
+            padding: 30px;
+        }
+        .success-box {
+            background: #D1FAE5;
+            border-left: 4px solid #10B981;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .warning-box {
+            background: #FEF3C7;
+            border-left: 4px solid #F59E0B;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .footer {
+            background: #f9fafb;
+            padding: 20px;
+            text-align: center;
+            font-size: 12px;
+            color: #6b7280;
+        }
+        .link {
+            color: #10B981;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Account Closed</h1>
+        </div>
+        <div class="content">
+            <h2>Hi {{.Name}},</h2>
+
+            <div class="success-box">
+                <strong>Your {{.AppName}} account has been closed</strong>
+                <p style="margin: 10px 0 0 0;">Your profile, sign-in methods, sessions and API keys have been deleted. You can no longer sign in with this account.</p>
+            </div>
+
+            <p>You are welcome to create a new account with this address at any time.</p>
+
+            <div class="warning-box">
+                <strong>⚠️ Didn't close your account?</strong>
+                <p style="margin: 10px 0 0 0;">Contact our support team immediately.</p>
+            </div>
+
+            <p>Best regards,<br>The {{.AppName}} Team</p>
+        </div>
+        <div class="footer">
+            <p>© {{.Year}} {{.AppName}}. All rights reserved.</p>
+            {{if .SupportEmail}}<p>Need help? Contact us at <a href="mailto:{{.SupportEmail}}" class="link">{{.SupportEmail}}</a></p>{{end}}
+        </div>
+    </div>
+</body>
+</html>

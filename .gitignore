@@ -23,6 +23,7 @@ vendor/
 .env
 .env.local
 .env.*.local
+deploy.env
 cmd/*/.env
 cmd/*/.env.local
 cmd/*/.env.*.local
@@ -49,3 +50,7 @@ logs/
 # Temporary files
 tmp/
 temp/
+
+# Claude Code: per-user settings and runtime state
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
