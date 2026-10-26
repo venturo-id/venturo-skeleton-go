@@ -1,4 +1,4 @@
-.PHONY: help migrate-up migrate-down migrate-create migrate-force migrate-version seed seed-admin db-setup db-reset dev build run test test-integration lint fmt
+.PHONY: help migrate-up migrate-down migrate-create migrate-force migrate-version seed seed-admin db-setup db-reset dev build run test test-integration lint lint-all fmt fmt-check check-changelog check-doc-sync check hooks
 
 help:
 	@echo "Available commands:"
@@ -9,8 +9,12 @@ help:
 	@echo "  make run                     - Run application"
 	@echo "  make test                    - Run all tests with the race detector"
 	@echo "  make test-integration        - Run the database tests (needs TEST_DATABASE_URL; TEST_MONGO_URI optional)"
-	@echo "  make lint                    - gofmt check, go vet and staticcheck"
-	@echo "  make fmt                     - Format all Go files"
+	@echo "  make lint                    - golangci-lint on the lines changed since BASE"
+	@echo "  make lint-all                - golangci-lint on the whole codebase (existing backlog included)"
+	@echo "  make fmt                     - Format all Go files (gofmt + goimports)"
+	@echo "  make fmt-check               - Fail when a Go file is not formatted"
+	@echo "  make check                   - fmt-check + lint + test + check-changelog + check-doc-sync (what CI runs)"
+	@echo "  make hooks                   - Use .githooks (commit message format of the Kinerja review)"
 	@echo ""
 	@echo "Database migrations:"
 	@echo "  make migrate-up              - Run all pending migrations"
@@ -34,9 +38,14 @@ help:
 DB_URL=postgresql://$(DB_USER)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=$(DB_SSLMODE)
 MIGRATIONS_PATH=internal/database/migrations
 
-# staticcheck is run through `go run` at a pinned version, so it is always
-# built with this module's Go version.
-STATICCHECK=honnef.co/go/tools/cmd/staticcheck@v0.8.2
+# golangci-lint is run through `go run` at a pinned version, so it is always
+# built with this module's Go version. Settings in .golangci.yml.
+GOLANGCI_LINT=github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+
+# The branch a change is compared with by lint, check-changelog and
+# check-doc-sync: the remote's default branch unless given, e.g.
+# `make check BASE=origin/production-simple`. CI passes the PR's base.
+BASE ?= $(shell git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)
 
 # Values from .env, when present (a fresh clone or CI has none)
 -include .env
@@ -128,10 +137,30 @@ test-integration:
 	@go test -race -count=1 -run Integration ./...
 
 fmt:
-	@gofmt -w .
+	@go run $(GOLANGCI_LINT) fmt ./...
 
+fmt-check:
+	@out=$$(go run $(GOLANGCI_LINT) fmt --diff ./...) || { echo "Not formatted (run make fmt):"; echo "$$out"; exit 1; }
+
+# Only issues on lines changed since BASE fail: the code from before
+# .golangci.yml has a backlog (make lint-all) that is paid down separately.
 lint:
-	@unformatted=$$(gofmt -l .); if [ -n "$$unformatted" ]; then echo "Not gofmt-ed:"; echo "$$unformatted"; exit 1; fi
-	@go vet ./...
-	@go run $(STATICCHECK) ./...
+	@if [ -z "$(BASE)" ]; then echo "Error: BASE is empty; e.g. make lint BASE=origin/production-simple"; exit 1; fi
+	@go run $(GOLANGCI_LINT) run --new-from-merge-base=$(BASE) ./...
 	@echo "✅ Lint passed"
+
+lint-all:
+	@go run $(GOLANGCI_LINT) run ./...
+
+check-changelog:
+	@scripts/check-changelog.sh $(BASE)
+
+check-doc-sync:
+	@scripts/check-doc-sync.sh $(BASE)
+
+check: fmt-check lint test check-changelog check-doc-sync
+	@echo "✅ All checks passed"
+
+hooks:
+	@git config core.hooksPath .githooks
+	@echo "✅ Git hooks enabled (.githooks)"

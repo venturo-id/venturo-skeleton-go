@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Rejects a commit message the Kinerja review gate would reject, so the PR is
+# not left unscored. Same patterns as kinerja-be:
+#   subject: project/domain/conventional_commit.go (ConventionalCommitRe)
+#   issue:   project/domain/space_issue_gate.go    (SpaceIssueCodeRe)
+# Git-generated "Merge …" and "Revert \"…\"" subjects are skipped, as there.
+# Install with `make hooks`.
+set -euo pipefail
+
+subject_re='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^()]+\))?!?: *[^[:space:]]'
+issue_re='\[[A-Za-z][A-Za-z0-9]{1,5}-[0-9]+\]'
+
+comment_char="$(git config --get core.commentChar || echo '#')"
+[ "$comment_char" = "auto" ] && comment_char='#'
+
+# The message as it will be committed: without comment lines, without the
+# diff `git commit -v` appends, without trailing carriage returns.
+message="$(sed -e '/^# ------------------------ >8 ------------------------$/,$d' "$1" \
+  | grep -v "^${comment_char}" | tr -d '\r' || true)"
+subject="$(printf '%s\n' "$message" | sed -e '/^[[:space:]]*$/d' | head -n 1 \
+  | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+if [ -z "$subject" ]; then
+  exit 0 # git aborts an empty message itself
+fi
+case "$subject" in
+  "Merge "* | 'Revert "'*) exit 0 ;;
+esac
+
+ok=true
+if ! printf '%s\n' "$subject" | grep -qiE "$subject_re"; then
+  echo "commit-msg: subject is not a Conventional Commit: $subject" >&2
+  echo "  expected: <type>(<scope>)?!?: <description>" >&2
+  echo "  type: build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test" >&2
+  ok=false
+fi
+if ! printf '%s\n' "$message" | grep -qE "$issue_re"; then
+  echo "commit-msg: no Space issue code like [ABC-123] in the message" >&2
+  ok=false
+fi
+$ok || {
+  echo "  e.g. feat(user): add avatar upload [TBX-42]" >&2
+  exit 1
+}

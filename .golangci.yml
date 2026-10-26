@@ -1,0 +1,92 @@
+# golangci-lint v2. The thresholds mirror the structural and readability rules
+# of the Kinerja code review (kinerja.venturo.id), so a PR that passes `make
+# lint` is not cut on them there. Change them together with the "Standar review
+# Kinerja" block in CLAUDE.md.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - dupl
+    - errcheck
+    - funlen
+    - goconst
+    - gocyclo
+    - govet
+    - mnd
+    - revive
+    - staticcheck
+    - unused
+  settings:
+    funlen:
+      # Kinerja counts a function from its `func` line to the closing brace,
+      # blank lines and comments included, and allows 50. funlen counts the
+      # lines between those two, so 48 here is 50 there.
+      lines: 48
+      statements: -1
+      ignore-comments: false
+    gocyclo:
+      # Reported above this value.
+      min-complexity: 10
+    dupl:
+      threshold: 150
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    govet:
+      enable:
+        - nilness
+    mnd:
+      ignored-functions:
+        - ^time\.
+        - ^logger\.
+    revive:
+      rules:
+        - name: argument-limit
+          arguments: [5]
+        # Depth of if/for/switch/select blocks counted from the function
+        # body — the closest match to Kinerja's "nesting ≤ 4".
+        - name: max-control-nesting
+          arguments: [4]
+        - name: file-length-limit
+          arguments:
+            - max: 800
+              skipComments: false
+              skipBlankLines: false
+        - name: var-naming
+        - name: exported
+  exclusions:
+    generated: lax
+    presets:
+      - std-error-handling
+    rules:
+      # Kinerja does not count literals in tests, configuration or log calls
+      # as magic values; table-driven tests repeat setup on purpose.
+      - path: _test\.go
+        linters:
+          - dupl
+          - goconst
+          - mnd
+      - path: ^internal/config/
+        linters:
+          - goconst
+          - mnd
+
+issues:
+  # funlen, gocyclo and argument-limit all report on the `func` line; the
+  # default (one issue per line) would show only one of them.
+  uniq-by-line: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - timebox-be
