@@ -13,7 +13,8 @@ kode Go non-test menambah entri di `## [Unreleased]` (dicek `make check-changelo
   `file-length-limit` 800, `var-naming`, `exported`), `dupl`, `mnd`, `goconst`, `unused`,
   `errcheck`, `govet` + `nilness`, `staticcheck`, formatter `gofmt` + `goimports`.
 - `make check` (fmt-check + lint + `test -race` + check-changelog + check-doc-sync),
-  `make fmt-check`, `make lint-all`, dan `make hooks`.
+  `make fmt-check`, `make lint-all`, dan `make hooks`. `BASE` diambil dari
+  `git config kinerja.base`, lalu `origin/HEAD`.
 - `scripts/check-changelog.sh`: gagal bila kode Go non-test berubah tanpa entri di
   `CHANGELOG.md`.
 - `scripts/check-doc-sync.sh`: gagal bila handler, DTO, router, atau migration berubah

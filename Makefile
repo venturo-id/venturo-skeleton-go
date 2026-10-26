@@ -45,7 +45,7 @@ GOLANGCI_LINT=github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 # The branch a change is compared with by lint, check-changelog and
 # check-doc-sync: the remote's default branch unless given, e.g.
 # `make check BASE=origin/production-simple`. CI passes the PR's base.
-BASE ?= $(shell git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)
+BASE ?= $(shell git config --get kinerja.base 2>/dev/null || git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)
 
 # Values from .env, when present (a fresh clone or CI has none)
 -include .env
@@ -145,7 +145,7 @@ fmt-check:
 # Only issues on lines changed since BASE fail: the code from before
 # .golangci.yml has a backlog (make lint-all) that is paid down separately.
 lint:
-	@if [ -z "$(BASE)" ]; then echo "Error: BASE is empty; e.g. make lint BASE=origin/production-simple"; exit 1; fi
+	@if [ -z "$(BASE)" ]; then echo "Error: BASE is empty; set it once with git config kinerja.base <base-branch>, or pass make lint BASE=<base-branch>"; exit 1; fi
 	@go run $(GOLANGCI_LINT) run --new-from-merge-base=$(BASE) ./...
 	@echo "✅ Lint passed"
 

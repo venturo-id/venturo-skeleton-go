@@ -15,7 +15,7 @@ make hooks                               # sekali per clone: pasang .githooks/co
 make test-integration                    # butuh TEST_DATABASE_URL ke database test yang sudah di-migrate
 ```
 
-`BASE` default `origin/HEAD`. Setup & database: `docs/guides/local-development.md`; modul baru: `docs/guides/new-module.md`.
+`BASE` default `git config kinerja.base`, lalu `origin/HEAD`; di project turunan set sekali: `git config kinerja.base origin/<branch-tujuan>`. Setup & database: `docs/guides/local-development.md`; modul baru: `docs/guides/new-module.md`.
 
 ## Konvensi yang berbeda dari kebiasaan
 
