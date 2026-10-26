@@ -25,7 +25,8 @@ kode Go non-test menambah entri di `## [Unreleased]` (dicek `make check-changelo
 - CI GitHub Actions (`.github/workflows/ci.yml`): `make check` dan batas 200 baris
   `CLAUDE.md` di setiap pull request.
 - Template pull request, `.claude/rules/` per lapisan, `.claude/settings.json` dengan
-  marketplace plugin `venturo-tools`.
+  marketplace plugin `venturo-tools` serta plugin `venturo-kinerja` dan mod
+  `venturo-kinerja-hud` yang langsung aktif (ditawarkan saat repo dibuka).
 - `docs/architecture.md`, `docs/guides/local-development.md`, `docs/guides/new-module.md`.
 
 ### Changed

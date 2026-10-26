@@ -7,5 +7,9 @@
         "url": "https://github.com/venturo-id/venturo-claude.git"
       }
     }
+  },
+  "enabledPlugins": {
+    "venturo-kinerja@venturo-tools": true,
+    "venturo-kinerja-hud@venturo-tools": true
   }
 }
