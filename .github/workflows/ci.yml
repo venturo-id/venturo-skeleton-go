@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+    # labeled/unlabeled: the "no-doc-change" label switches check-doc-sync off.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # lint, check-changelog and check-doc-sync compare with the merge
+          # base, which needs the history of both branches.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: CLAUDE.md at most 200 lines
+        run: |
+          lines=$(wc -l < CLAUDE.md)
+          echo "CLAUDE.md: $lines lines"
+          if [ "$lines" -gt 200 ]; then
+            echo "::error file=CLAUDE.md::CLAUDE.md has $lines lines (max 200); move details to docs/ or .claude/rules/"
+            exit 1
+          fi
+
+      - name: make check
+        env:
+          BASE: origin/${{ github.base_ref }}
+          DOC_SYNC_SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'no-doc-change') }}
+        run: make check

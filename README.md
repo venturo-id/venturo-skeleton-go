@@ -95,7 +95,13 @@ go install github.com/air-verse/air@latest
 
    Role sistem `super_admin` dan `administrator` dibuat oleh migration — tidak ada seeder SQL.
 
-5. Jalankan server dengan hot reload:
+5. Pasang git hook (format commit yang diterima review Kinerja):
+
+   ```bash
+   make hooks
+   ```
+
+6. Jalankan server dengan hot reload:
 
    ```bash
    make dev
@@ -122,8 +128,13 @@ curl -X POST http://localhost:8080/core/v1/auth/signin \
 | `make build` | Build binary ke `bin/timebox-api` |
 | `make test` | Semua test dengan race detector (`go test -race ./...`) |
 | `make test-integration` | Test integrasi (`-run Integration`) ke PostgreSQL sungguhan (`TEST_DATABASE_URL`, wajib) dan MongoDB (`TEST_MONGO_URI`, opsional) |
-| `make lint` | Cek gofmt, `go vet`, dan staticcheck |
-| `make fmt` | Format semua file Go |
+| `make check BASE=origin/<branch>` | Yang dijalankan CI: `fmt-check` + `lint` + `test` + `check-changelog` + `check-doc-sync` |
+| `make lint BASE=origin/<branch>` | golangci-lint ([.golangci.yml](.golangci.yml), ambang review Kinerja) — hanya baris yang berubah sejak `BASE` (default `origin/HEAD`) |
+| `make lint-all` | golangci-lint di seluruh repo, termasuk pelanggaran lama |
+| `make fmt` / `make fmt-check` | Format (gofmt + goimports) / cek format semua file Go |
+| `make check-changelog` | Gagal kalau kode Go non-test berubah tanpa entri di [CHANGELOG.md](CHANGELOG.md) |
+| `make check-doc-sync` | Gagal kalau handler/DTO/router/migration berubah tanpa update `docs/api-contract/` atau `docs/erd/` |
+| `make hooks` | Pasang `.githooks/commit-msg`: subject Conventional Commit + kode issue Space `[KODE-123]` |
 | `make migrate-up` | Jalankan semua migration yang belum jalan |
 | `make migrate-down MODULE=core` | Rollback satu migration terakhir |
 | `make migrate-create NAME=create_foo MODULE=core` | Buat file migration baru |
@@ -171,7 +182,7 @@ Jangan taruh `TEST_DATABASE_URL` / `TEST_MONGO_URI` di `.env`: `make` mengekspor
 └── Makefile
 ```
 
-Setiap modul mengikuti pola `domain/`, `dto/`, `handler/`, `repository/`, `service/` + `main.<modul>.go`; konvensinya dijelaskan di [CLAUDE.md](CLAUDE.md).
+Setiap modul mengikuti pola `domain/`, `dto/`, `handler/`, `repository/`, `service/` + `main.<modul>.go`; konvensinya dijelaskan di [CLAUDE.md](CLAUDE.md) dan [.claude/rules/](.claude/rules/), arsitekturnya di [docs/architecture.md](docs/architecture.md).
 
 ## Logging
 
@@ -187,4 +198,7 @@ Kalau `DISCORD_ALERT_WEBHOOK` diisi, log di level `DISCORD_ALERT_LEVEL` (`warn` 
 - [docs/api-contract/README.md](docs/api-contract/README.md) — format response, autentikasi, permission, dan kontrak tiap endpoint
 - [docs/erd/README.md](docs/erd/README.md) — ERD skema `core`
 - [deployments/README.md](deployments/README.md) — image Docker, entrypoint, dan kebutuhan deployment Kubernetes
-- [CLAUDE.md](CLAUDE.md) — arsitektur dan konvensi kode
+- [docs/architecture.md](docs/architecture.md) — arsitektur, model akses, dan batas runtime
+- [docs/guides/](docs/guides/) — development lokal dan cara menambah modul
+- [CLAUDE.md](CLAUDE.md) — perintah, konvensi, standar review Kinerja, dan delegasi sub-agent untuk Claude Code
+- [CHANGELOG.md](CHANGELOG.md) — perubahan per rilis
