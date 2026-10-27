@@ -27,6 +27,8 @@ kode Go non-test menambah entri di `## [Unreleased]` (dicek `make check-changelo
 - Template pull request, `.claude/rules/` per lapisan, `.claude/settings.json` dengan
   marketplace plugin `venturo-tools` serta plugin `venturo-kinerja` dan mod
   `venturo-kinerja-hud` yang langsung aktif (ditawarkan saat repo dibuka).
+- `.claude/venturo-kinerja.json` (`"mode": "enforce"`): project turunan skeleton selalu
+  memakai aturan Kinerja penuh, termasuk sebelum remote-nya dipindah ke org `venturo-id`.
 - `docs/architecture.md`, `docs/guides/local-development.md`, `docs/guides/new-module.md`.
 
 ### Changed
